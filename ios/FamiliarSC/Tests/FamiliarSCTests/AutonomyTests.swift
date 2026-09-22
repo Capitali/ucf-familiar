@@ -1,7 +1,7 @@
 import XCTest
 @testable import FamiliarSC
 
-/// The dial, in lockstep with crates/whisker/src/autonomy.rs — the same four pins the
+/// The dial, in lockstep with crates/pilot/src/autonomy.rs — the same four pins the
 /// Rust tests hold, plus the file-level truths the app must tell the captain.
 final class AutonomyTests: XCTestCase {
     func testAbsentDialIsAutoForEverythingButTheTanker() {

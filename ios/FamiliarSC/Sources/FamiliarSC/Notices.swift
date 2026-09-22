@@ -88,7 +88,7 @@ public enum NoticePolicy {
     /// renews only when a human passed `--renew` — so the captain must hear early.
     public static func leaseNotice(hoursLeft: Int64, at: Int64) -> CaptainNotice? {
         if hoursLeft < 0 { return CaptainNotice(kind: .lease, title: "Lease expired", body: "the pilot cannot fly her until the lease is renewed", tick: nil, at: at) }
-        if hoursLeft <= 4 { return CaptainNotice(kind: .lease, title: "Lease lapses in \(hoursLeft)h", body: "renew with `familiar fleet run --renew`", tick: nil, at: at) }
+        if hoursLeft <= 4 { return CaptainNotice(kind: .lease, title: "Lease lapses in \(hoursLeft)h", body: "renew with `ucf-familiar fleet run --renew`", tick: nil, at: at) }
         return nil
     }
 }

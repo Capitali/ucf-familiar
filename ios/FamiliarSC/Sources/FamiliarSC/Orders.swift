@@ -1,15 +1,15 @@
 import Foundation
 
-// T-252 — the captain's word is an order (Ian, 2026-09-19: "I've given a command to Felix,
-// and the response is status and something about calling paws. Unacceptable."). A sentence
+// The captain's word is an order. The incident that settled it (2026-09-19): a command was
+// given to Felix and the answer was status, plus something about calling paws. A sentence
 // like "bring all the ships to paws truck stop, wait there for my next instruction" is not a
 // question about the ship; it is two standing orders for every hull the captain flies. This
 // file is the typed order and the deterministic reading of it — no model needed, so the
 // templated lane reads an order exactly as the on-device lane does. Nothing here writes: the
 // orders are put to the captain and filed on ONE tap, the same act as every proposal.
 
-/// One standing order as the host's `orders.json` takes it (T-246) plus the two course verbs
-/// (T-252), and who it is for.
+/// One standing order as the host's `orders.json` takes it, plus the two course verbs, and
+/// who it is for.
 public struct OrderRequest: Equatable, Sendable, Identifiable {
     public enum Verb: String, Equatable, Sendable, CaseIterable {
         case travel, hold, repair, refuel, payLease

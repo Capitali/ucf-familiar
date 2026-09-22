@@ -1,7 +1,7 @@
 // swift-tools-version:5.9
 import PackageDescription
 
-// FamiliarSC — the ship's computer's Apple half (T-237 B2). Pure logic: the ship-store
+// FamiliarSC — the ship's computer's Apple half. Pure logic: the ship-store
 // reader (persona, captain, automations, the autonomy dial, journal, proposals/approvals,
 // holdings, deliveries), the message-window feed, a typed READ-ONLY client for the UCF
 // exchange's /v1 wire, the pairing-key parse, the captain-notice policy, and the bridge
@@ -17,15 +17,15 @@ import PackageDescription
 // unavailable — the floor is the product, the model is the voice.
 let package = Package(
     name: "FamiliarSC",
-    // Floors are 26 (ADR-0046 / T-227); visionOS joins for the ΔV bridge (B4).
+    // Floors are 26; visionOS joins for the ΔV bridge.
     platforms: [.macOS("26.0"), .iOS("26.0"), .visionOS("26.0")],
     products: [
         .library(name: "FamiliarSC", targets: ["FamiliarSC"]),
-        // T-237 B3: the captain's bridge screens (SwiftUI) over FamiliarSC — hostable by
-        // either SKU shape (a mode inside the Familiar app, or a separate Familiar SC app).
+        // The captain's bridge screens (SwiftUI) over FamiliarSC — hostable by either SKU
+        // shape (a mode inside the Familiar app, or a separate Familiar SC app).
         .library(name: "FamiliarSCUI", targets: ["FamiliarSCUI"]),
         // A macOS stand-in for the captain's bridge: reads a ship store and speaks the
-        // report — the visible proof for B2 ("what did you do today", from a real journal).
+        // report — the visible proof ("what did you do today", from a real journal).
         .executable(name: "familiar-bridge", targets: ["familiar-bridge"]),
     ],
     targets: [

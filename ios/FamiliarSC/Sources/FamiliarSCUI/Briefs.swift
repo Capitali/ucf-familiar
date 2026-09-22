@@ -2,7 +2,7 @@ import Foundation
 import FamiliarSC
 
 // The host's briefs, rendered into the plain lines the computer reads and the grounding
-// check counts (wildhorse e6b1f0a: GET /ships/{world}/fuel, GET /ships/{world}/brief).
+// check counts (GET /ships/{world}/fuel, GET /ships/{world}/brief).
 // Pure functions over the JSON, so a test pins what "how do I refuel?" is answered from.
 
 public enum Briefs {
@@ -88,7 +88,7 @@ public enum Briefs {
     /// surface it spends, the captain's level, the automation it needs. A reading, never an act.
     /// `governed` = a dial governs this reading (a host's pilot obeys it); direct mode passes
     /// false — no dial exists on the device and the seam's default level is NOT the captain's
-    /// setting (codex T-237 B4 re-verification, finding 5), so nothing is claimed about one.
+    /// setting, so nothing is claimed about one.
     public static func pilot(_ v: JSONValue, governed: Bool = true) -> String {
         let d = v["decision"] ?? .null
         let act: String
@@ -133,8 +133,7 @@ public enum Briefs {
 
     /// The seam's `reasons` — a stable code and the bounded numbers that chose the branch —
     /// said in words. The prose is the shell's; every fact is the doctrine's, and an unknown
-    /// code is said as its facts rather than dressed in a rationale the shell invented
-    /// (codex T-237 B4 re-verification, finding 4).
+    /// code is said as its facts rather than dressed in a rationale the shell invented.
     public static func reasons(_ r: JSONValue) -> String {
         guard let code = r["code"]?.string else { return "" }
         func n(_ k: String) -> String { r[k]?.int.map { String($0) } ?? r[k]?.double.map { String($0) } ?? "?" }
@@ -155,7 +154,7 @@ public enum Briefs {
         case "freight.best-net-per-tick":
             return "load \(s("load_id")) nets ℳ\(n("estimated_net")) over \(n("deadhead_ticks")) deadhead + \(n("haul_ticks")) haul ticks, due t\(n("deliver_deadline_tick")) at t\(n("tick")), the best of \(n("candidates")) on the board"
         case "freight.chain-preferred":
-            // T-238's freight half: the chain's word broke a near-tie (within 5% of the best rate) —
+            // The chain's word broke a near-tie (within 5% of the best rate) —
             // this load feeds a works whose shelf is draining, or lifts one that is filling.
             return "load \(s("load_id")) nets ℳ\(n("estimated_net")) over \(n("deadhead_ticks")) deadhead + \(n("haul_ticks")) haul ticks, due t\(n("deliver_deadline_tick")) at t\(n("tick")) — within 5% of the best rate among \(n("candidates")), and preferred because the supply chain wants it (pressure \(n("chain_pressure")))"
         case "freight.laden-leg": return "load \(s("load_id")) is aboard, bound for \(s("station"))"
@@ -170,9 +169,9 @@ public enum Briefs {
 
     /// The host's `captain_store` slug, reproduced EXACTLY (every character that is not
     /// ASCII alphanumeric becomes `-`, then the ends are trimmed; empty → `captain`).
-    /// LEGACY FALLBACK ONLY: a client must never reproduce a filesystem transform (codex,
-    /// T-236 re-verification finding 9) — the ships row carries `captain_brief`, a
-    /// server-built path, and that is what `WireFeed` asks for whenever it is present.
+    /// LEGACY FALLBACK ONLY: a client must never reproduce a filesystem transform — the ships
+    /// row carries `captain_brief`, a server-built path, and that is what `WireFeed` asks for
+    /// whenever it is present.
     /// This stays for hosts that predate the field, pinned against the host's own cases.
     public static func captainSlug(_ name: String) -> String {
         var out = ""
@@ -211,7 +210,7 @@ public enum Briefs {
             if let a = k["aboard_at_cost"]?.int { parts.append("ℳ\(a) aboard at cost") }
             if !parts.isEmpty { out.append("The fleet's book: " + parts.joined(separator: ", ") + ".") }
         }
-        // The week's money, pooled, in the host's own sentences (T-241): the brief carries the
+        // The week's money, pooled, in the host's own sentences: the brief carries the
         // summary without points, so she can answer "how are we doing" without a second read.
         if let e = b["economy"].flatMap(EconomyHistory.init(json:)), !e.analysis.isEmpty {
             var line = "The fleet's money this week: " + e.analysis.joined(separator: "; ")

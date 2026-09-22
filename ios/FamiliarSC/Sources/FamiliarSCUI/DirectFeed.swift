@@ -1,15 +1,15 @@
 import Foundation
 import FamiliarSC
 
-// Direct mode: the app talks to an exchange itself with the captain's own key — Jeff's PROD,
-// or a dev world such as MacOnStick's LOCAL. No familiar host means no pilot: no proposals,
-// no dial, no pairing; Felix observes, briefs and advises from the wire alone, and the fuel
-// picture is computed here from stations, routes and quotes. Acts that need a host say so.
-// When the host side moves to a server farm (Ian, 2026-09-04: "a virtual server farm in the
-// cloud … a massively multiplayer universe"), a captain's Felix runs there and this mode is
-// what the app does before, or without, one.
+// Direct mode: the app talks to an exchange itself with the captain's own key — the
+// exchange's PROD, or a dev world such as a LOCAL one. No fleet host means no pilot: no
+// proposals, no dial, no pairing; Felix observes, briefs and advises from the wire alone, and
+// the fuel picture is computed here from stations, routes and quotes. Acts that need a host
+// say so. When the host side moves to a server farm (2026-09-04: "a virtual server farm in
+// the cloud … a massively multiplayer universe"), a captain's Felix runs there and this mode
+// is what the app does before, or without, one.
 
-/// Where a Felix lives for one captain: a familiar host's fleet feed, or the exchange direct.
+/// Where a Felix lives for one captain: a fleet host's feed, or the exchange direct.
 public enum Connection: Codable, Equatable, Sendable, Identifiable {
     case host(name: String, feedURL: String)
     case direct(name: String, exchangeURL: String, keyID: String)
@@ -39,12 +39,12 @@ public enum KnownExchange {
 
 /// The captain's own persona in direct mode lives on the device (no host store): one name and
 /// style per exchange key, defaulting to Purr until the captain names her.
-/// INTERIM, not the design (Ian's ruling 2026-09-07, filed as united-cat-foods-metal#86): the
-/// ship's computer's name is the captain's, and it belongs on the captain's record in the
-/// WORLD — a child namespace that follows the captain to every hull, station and raceway.
-/// Until Jeff serves that field, direct mode keeps a per-key name the captain types here;
-/// when the wire carries it, this store becomes at most a cache of the world's fact.
-/// Do not build more on it.
+/// INTERIM, not the design (the owner's ruling 2026-09-07, filed as
+/// united-cat-foods-metal#86): the ship's computer's name is the captain's, and it belongs on
+/// the captain's record in the WORLD — a child namespace that follows the captain to every
+/// hull, station and raceway. Until the exchange serves that field, direct mode keeps a
+/// per-key name the captain types here; when the wire carries it, this store becomes at most
+/// a cache of the world's fact. Do not build more on it.
 public struct DevicePersonaStore: @unchecked Sendable {  // UserDefaults is thread-safe; the compiler does not know it
     public let defaults: UserDefaults
     public init(defaults: UserDefaults = .standard) { self.defaults = defaults }
@@ -63,7 +63,7 @@ public struct DirectFeed: ShipsFeed, CaptainActs {
     public var client: ExchangeClient
     public let keyID: String
     public var personas = DevicePersonaStore()
-    /// The pilot's MIND, when the app links FamiliarCore (T-237 B4, "one doctrine, two runtimes"):
+    /// The pilot's MIND, when the app links FamiliarCore ("one doctrine, two runtimes"):
     /// `whiskerAdvise(inputJson:)` — the same Rust doctrine the host runner flies, answering from
     /// the JSON this feed fetched. Nil in a shell without the core (tests, the package alone):
     /// then there is no pilot document and the computer says so.
@@ -74,8 +74,8 @@ public struct DirectFeed: ShipsFeed, CaptainActs {
     /// The seam this shell was built for. `whisker_advise` stamps its answer with
     /// `seam_version`; a mismatch means the core linked into this build and the shell's
     /// reading of it are not the same generation, and the verdict is refused rather than
-    /// read past — the skew guard codex asked for in place of a manual promise (T-237 B4
-    /// re-verification, finding 1). Bump together with `whisker::wire::SEAM_VERSION`.
+    /// read past — the skew guard a review asked for in place of a manual promise. Bump
+    /// together with `ucf_pilot::wire::SEAM_VERSION`.
     public static let seamVersion: Int64 = 3
 
     /// One gather of the pilot's mind: the reading, the raw verdict, the act it maps to when
@@ -136,7 +136,7 @@ public struct DirectFeed: ShipsFeed, CaptainActs {
         out.worldName = s.worldName
         out.titled = m.titled
         out.pronouns = persona?.pronouns
-        // The bay from the ledger itself (T-243): every load `/v1/me.freight` still holds open,
+        // The bay from the ledger itself: every load `/v1/me.freight` still holds open,
         // at the word it holds it — the same reading the seam makes.
         out.heldContracts = DirectFeed.openLoads(freight: m.freight ?? []).map { ShipSummary.HeldContract(loadId: $0.loadId, word: $0.word) }
         return [out]
@@ -210,7 +210,8 @@ public struct DirectFeed: ShipsFeed, CaptainActs {
         let name = personas.load(keyID: keyID)?.name ?? Persona.rootName
         // The frame says where the mind is: in direct mode the pilot PROCESS is on the host (or
         // nowhere), while the pilot's MIND — the same doctrine — answers from this device when
-        // the shell links the core. "No pilot aboard" read as a fault on Ian's iPad (2026-09-07).
+        // the shell links the core. "No pilot aboard" read as a fault on a captain's
+        // iPad (2026-09-07).
         let mind = adviser == nil ? "no pilot's mind in this shell" : "the pilot's mind answers from this device; no pilot process aboard"
         let frame = "ship, hull \(m.shipName ?? "?") (\(worldInstance ?? KnownExchange.name(for: client.server.absoluteString))), captain \((try? await client.profile())?.traderName ?? "?"), computer \(name) — direct to the exchange; \(mind)"
         var docs: [ContextDocument] = []
@@ -245,12 +246,12 @@ public struct DirectFeed: ShipsFeed, CaptainActs {
         let stations = try JSONDecoder().decode(JSONValue.self, from: try await client.get("/v1/stations"))
         // The captain's own board is a REQUIRED read: a 500, a timeout or an unreadable shape
         // here used to read as "no active contract", and a hull under contract could be
-        // shown — and after the same failure on the fresh re-read, FILED — a freight-idle act
-        // (codex T-237 B4 re-verification r2, finding 1). Now the gather fails, named.
+        // shown — and after the same failure on the fresh re-read, FILED — a freight-idle act.
+        // Now the gather fails, named.
         // …and the read is the endpoint's SHAPE, not just JSON: the board is an array of the
         // captain's rows. An HTTP-200 object (`{"error": …}`), `null` or a scalar decoded as
         // "any JSON" and became the same empty board as a real `[]` — freight-idle, judged, and
-        // on the fresh re-read FILED (codex r3, finding 1). Now anything but an array fails.
+        // on the fresh re-read FILED. Now anything but an array fails.
         let mineData = try await client.get("/v1/loadboard?mine=true")
         let mine: [JSONValue]
         do { mine = try JSONDecoder().decode([JSONValue].self, from: mineData) }
@@ -260,7 +261,7 @@ public struct DirectFeed: ShipsFeed, CaptainActs {
             } ?? "not JSON"
             throw ExchangeError.decode("/v1/loadboard?mine=true", "expected the captain's rows as an array, got \(kind)")
         }
-        // …and every member is a ROW (codex r4, finding 1): the doctrine's `load_row` needs a
+        // …and every member is a ROW: the doctrine's `load_row` needs a
         // string loadId, origin and dest, and drops anything less — so a member that carries
         // only the ledger's id satisfied the missing-row guard here and read as no contract
         // there. Nothing less than a row passes this door.
@@ -311,8 +312,8 @@ public struct DirectFeed: ShipsFeed, CaptainActs {
             return out
         }
         // Keys hoisted out of the closures: four optional chains with ?? and + inside one
-        // sort closure is the type-checker's classic blow-up under -O (Xcode 26.5 Release
-        // archive on wildhorse, 2026-09-08 — a debug build passes what Release rejects).
+        // sort closure is the type-checker's classic blow-up under -O (an Xcode 26.5 Release
+        // archive, 2026-09-08 — a debug build passes what Release rejects).
         func routeKey(_ r: JSONValue) -> String { (r["from"]?.string ?? "") + "→" + (r["to"]?.string ?? "") }
         let routes = priced.map(\.row).sorted { routeKey($0) < routeKey($1) }
         let unquotedRungs = priced.reduce(0) { $0 + $1.unquoted }
@@ -329,15 +330,16 @@ public struct DirectFeed: ShipsFeed, CaptainActs {
         var input: [String: JSONValue] = ["me": me, "board": board, "stations": stations, "routes": .array(routes),
                                           "repair_per_hundred_bps": .number(Double(repair))]
         if let active { input["active"] = .object(["row": active]) }
-        // The rest of the bay (T-243 slices 1+2): every other open contract on the captain's
+        // The rest of the bay: every other open contract on the captain's
         // board rides as `contracts[]`, `{row}` only — the seam takes each word from the ledger
         // as it does for the active, and drops a row the ledger has settled. Absent = one in
         // hand, as before; the seam version is unchanged.
         let companions = live.filter { $0["loadId"]?.string != active?["loadId"]?.string }.sorted { activeKey($0) < activeKey($1) }
         if !companions.isEmpty { input["contracts"] = .array(companions.map { .object(["row": $0]) }) }
         // What this key may NOT file, from its papers — read exactly as the host reads them
-        // (whisker main.rs): no `act` scope means no repair, no tanker call, no refit, no lease
-        // payment, no frame. Empty or unreadable papers deny nothing, as on the host.
+        // (crates/pilot/src/main.rs): no `act` scope means no repair, no tanker call, no
+        // refit, no lease payment, no frame. Empty or unreadable papers deny nothing, as
+        // on the host.
         let scopes = (try? await client.profile())?.scopes ?? []
         if !(scopes.isEmpty || scopes.contains("act")) {
             input["denied"] = .array(DirectFeed.deniedWithoutAct.map { .string($0) })
@@ -371,9 +373,10 @@ public struct DirectFeed: ShipsFeed, CaptainActs {
         var notes: [String] = []
         if advice.unpriced > 0 { notes.append("Priced \(routes.count) of \(legs.count) legs — the exchange would not price the rest, so a pump or a load it needed may read as out of reach.") }
         if unquotedRungs > 0 { notes.append("The exchange did not price this hull at \(unquotedRungs) pump rung\(unquotedRungs == 1 ? "" : "s"); those pumps are judged from the reference quote, as the host does when the world will not say.") }
-        // T-238's freight half: the host's rows carry the chain's word (`chain_pressure`) and the
-        // doctrine breaks near-ties with it; this device sends none (absent = 0), so on a near-tie
-        // the host may prefer a load this reading does not — an honest, stated limit.
+        // The freight half of the chain: the host's rows carry the chain's word
+        // (`chain_pressure`) and the doctrine breaks near-ties with it; this device sends
+        // none (absent = 0), so on a near-tie the host may prefer a load this reading
+        // does not — an honest, stated limit.
         if verdict["decision"]?["type"]?.string == "book" { notes.append("Chain pressure is not modelled on this device: the host, which has the supply-chain forecast, may prefer a near-equal load that feeds a works.") }
         advice.text = ([Briefs.pilot(verdict, governed: false)] + notes).joined(separator: "\n")
         if let act = ExchangeAct.from(decision: verdict["decision"] ?? .null, docked: verdict["ship"]?["docked"]?.string) {
@@ -447,7 +450,8 @@ public struct DirectFeed: ShipsFeed, CaptainActs {
         openLoads(events: freight.compactMap { f in f.loadId.map { ($0, f.event) } })
     }
 
-    /// The verbs a key without `act` cannot file — the host's list, verbatim (whisker main.rs).
+    /// The verbs a key without `act` cannot file — the host's list, verbatim
+    /// (crates/pilot/src/main.rs).
     static let deniedWithoutAct = ["repair", "paws", "refit", "payLease", "expandFrame"]
 
     static func openLoads(events: [(String, String)]) -> [(loadId: String, word: String)] {
@@ -507,7 +511,7 @@ public struct DirectFeed: ShipsFeed, CaptainActs {
     /// itself is taken: a travel for THIS hull goes to the exchange now, under the captain's
     /// own key. A hold is the pilot's to keep and the fleet is the host's to reach.
     public func order(_ order: OrderRequest, world: String) async throws -> String {
-        guard order.scope == .thisHull else { throw FeedError.needsHost("the fleet's orders go through a familiar host; this device holds one key") }
+        guard order.scope == .thisHull else { throw FeedError.needsHost("the fleet's orders go through a fleet host; this device holds one key") }
         switch order.verb {
         case .travel:
             guard let station = order.station else { throw FeedError.refused("a travel order needs a station") }
@@ -519,20 +523,20 @@ public struct DirectFeed: ShipsFeed, CaptainActs {
             let ack = try await client.file(ExchangeAct.callPaws.body, actionId: "sc-order-\(Int(Date().timeIntervalSince1970))")
             return "Filed: the tanker is called (\(ack.actionId))" + (ack.resolvesAtTick.map { " — the fold answers at t\($0)" } ?? "") + "."
         case .repair, .refuel, .payLease, .resume:
-            throw FeedError.needsHost("standing orders wait for a pilot on a familiar host; in direct mode confirm the act from the bridge instead")
+            throw FeedError.needsHost("standing orders wait for a pilot on a fleet host; in direct mode confirm the act from the bridge instead")
         }
     }
 
     public func approve(world: String, proposalID: String, approved: Bool) async throws { throw FeedError.needsHost("proposals come from a pilot, and there is no pilot in direct mode") }
     public func setDial(world: String, dial: AutonomyDial) async throws { throw FeedError.needsHost("the dial governs a pilot, and there is no pilot in direct mode") }
-    public func pair(_ request: PairingRequest, key: PairingKey) async throws { throw FeedError.needsHost("pairing runs a pilot on a familiar host; add a host connection to pair") }
+    public func pair(_ request: PairingRequest, key: PairingKey) async throws { throw FeedError.needsHost("pairing runs a pilot on a fleet host; add a host connection to pair") }
     public func unpair(world: String) async throws { throw FeedError.needsHost("nothing is paired in direct mode; remove the connection instead") }
     public func rename(world: String, computer: String) async throws -> String? {
         var p = personas.load(keyID: keyID) ?? Persona(name: computer, style: Style())
         p.name = computer; p.personaVersion = 2
         if p.style == nil { p.style = Style() }
         personas.save(p, keyID: keyID)
-        return "named on this device; a familiar host would carry it across the fleet"
+        return "named on this device; a fleet host would carry it across the fleet"
     }
     public func setAutomations(world: String, automations: [Automation]) async throws -> String? { throw FeedError.needsHost("automations are a pilot's grants; there is no pilot in direct mode") }
     public func setCaptain(world: String, captain: String) async throws -> String? { throw FeedError.needsHost("captains are a host's records; the exchange already knows this key's trader") }

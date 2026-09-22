@@ -5,7 +5,7 @@ final class NoticeTests: XCTestCase {
     func testOnlyWhatDeservesTheCaptainsAttention() {
         let n = NoticePolicy.notices(for: Fixtures.journal().entries)
         // Every refusal at the door reaches the captain — refit and engage refusals were
-        // silent until 2026-09-08 (codex T-237 B2 re-verification, finding 4).
+        // silent until 2026-09-08, when a review found them.
         XCTAssertEqual(n.map(\.kind), [.money, .money, .money, .distress, .distress, .distress, .advice, .needsTheCaptain, .needsTheCaptain, .needsTheCaptain, .hull, .distress, .distress, .distress, .distress])
         XCTAssertEqual(n.filter { $0.title == "Exchange unreachable" }.count, 1, "a run of unreachable lines is one notice")
         XCTAssertFalse(n.contains { $0.title.contains("holding") || $0.body.contains("waiting on the crane") })
@@ -41,12 +41,12 @@ final class PairingTests: XCTestCase {
     }
 
     func testRequestValidationAndArgvCarryNoSecret() {
-        var r = PairingRequest(label: "KK II", captain: "Ian", server: "https://exchange.example", automations: [.freight, .trade], computerName: "Purr")
+        var r = PairingRequest(label: "KK II", captain: "Luke SkyWhisker", server: "https://exchange.example", automations: [.freight, .trade], computerName: "Purr")
         XCTAssertNil(r.validate())
         let argv = r.fleetPairArguments(keyFile: "/tmp/key")
-        XCTAssertEqual(argv, ["fleet", "pair", "--label", "KK II", "--captain", "Ian", "--server", "https://exchange.example", "--key-file", "/tmp/key", "--automations", "freight,trade", "--computer-name", "Purr"])
+        XCTAssertEqual(argv, ["fleet", "pair", "--label", "KK II", "--captain", "Luke SkyWhisker", "--server", "https://exchange.example", "--key-file", "/tmp/key", "--automations", "freight,trade", "--computer-name", "Purr"])
         XCTAssertFalse(argv.joined(separator: " ").contains("ucfk_"))
-        let joins = PairingRequest(label: "KK", captain: "Ian", server: "https://exchange.example", automations: [.freight], computerName: nil)
+        let joins = PairingRequest(label: "KK", captain: "Luke SkyWhisker", server: "https://exchange.example", automations: [.freight], computerName: nil)
         XCTAssertFalse(joins.fleetPairArguments(keyFile: "/k").contains("--computer-name"), "no name → the hull joins the captain's computer")
         r.server = "exchange.example"
         XCTAssertEqual(r.validate(), .badServer("exchange.example"))

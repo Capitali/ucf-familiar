@@ -3,8 +3,8 @@ import Foundation
 import FoundationModels
 #endif
 
-// The bridge voice: the ladder on-device → Private Cloud Compute → the templated floor
-// (dialogue §3, §4). The model SPEAKS the report; it never decides it. Every report it
+// The bridge voice: the ladder on-device → Private Cloud Compute → the templated floor.
+// The model SPEAKS the report; it never decides it. Every report it
 // produces is checked against the floor before it is shown — any number, id, tick or
 // station the floor did not say, or a mood softer than the floor's, and the floor's own
 // words are shown instead. The model may propose (a dial change through a tool); the
@@ -24,7 +24,7 @@ public struct VoiceConsent: Equatable {
     /// it per App ID and the app declares it (Info.plist `FamiliarPrivateCloudComputeEntitled`
     /// once the profile carries it). It gates every PCC call because `availability` LIES for
     /// an unentitled process — it answers `.available`, and the first `respond` is a SIGTRAP,
-    /// not a thrown error (Axiom foundation-models-evaluations-diag, pattern 9). Default off.
+    /// not a thrown error. Default off.
     public var privateCloudComputeEntitled: Bool
     public init(privateCloudCompute: Bool = false, privateCloudComputeEntitled: Bool = false) {
         self.privateCloudCompute = privateCloudCompute
@@ -50,7 +50,7 @@ public struct BridgeContext: Sendable {
     public var openProposals: Int
     public var question: String
     /// What the captain is looking at — "ship Kibble Klipper (PROD), captain Luke SkyWhisker,
-    /// computer Felix" — the frame every answer is given in (Ian: "context makes all the difference").
+    /// computer Felix" — the frame every answer is given in: context makes all the difference.
     public var frame: String?
     public var documents: [ContextDocument]
 
@@ -101,7 +101,7 @@ public enum Grounding {
     /// The axes a statement can flip while keeping every number: which SIDE of a trade, and
     /// whether the thing was DONE or refused. Token provenance alone let "bought 40 ore at
     /// ask 15 at foxys-diner" become "sold …" and "buy catnip refused at the door" become
-    /// "bought catnip" (codex T-237 B2 re-verification, finding 1). Each word carries its
+    /// "bought catnip", until a review pass caught both. Each word carries its
     /// axis and sign; a negation within two words before it flips the sign.
     /// The OUTCOME axis: done (+) or refused (−). The SIDE axis (buy/sell) is `sideWords`.
     static let outcomeWords: [String: Bool] = [
@@ -129,7 +129,7 @@ public enum Grounding {
     /// Identifiers a statement is ABOUT — what binds it to a source fact. Strong ones (a load,
     /// a tick, a proposal, a station) bind alone; bare numbers bind only when there is nothing
     /// stronger, because "40" is in half the journal.
-    /// A STATION or a GOOD is not a binding key (codex T-237 B2 r2, finding 1): every trade at
+    /// A STATION or a GOOD is not a binding key: every trade at
     /// foxys-diner shares that token, so binding on it let a second, opposite-side trade at the
     /// same berth lend an inverted sentence its sign. Stations stay in the invention check
     /// (`checkReply`), where they belong.
@@ -229,7 +229,7 @@ public final class BridgeVoice: @unchecked Sendable {
         proposedChanges.append(c)
     }
 
-    /// The orders the captain gave (T-252), read by the parser or the model's tool, waiting
+    /// The orders the captain gave, read by the parser or the model's tool, waiting
     /// for the captain's tap. Taking them clears them: they belong to the app from then on.
     public func takeOrders() -> [OrderRequest] {
         lock.lock(); defer { lock.unlock() }
@@ -243,7 +243,7 @@ public final class BridgeVoice: @unchecked Sendable {
     }
 
     /// The orders recorded so far this turn, left in place for `takeOrders`: the
-    /// conversation reads them to decide whether the model's turn was an order (T-254).
+    /// conversation reads them to decide whether the model's turn was an order.
     public func peekOrders() -> [OrderRequest] {
         lock.lock(); defer { lock.unlock() }
         return orders
@@ -262,7 +262,7 @@ public final class BridgeVoice: @unchecked Sendable {
 
     #if canImport(FoundationModels)
     /// Answers are FACTS retold, not prose invented: a low temperature keeps the model on the
-    /// journal's words (Axiom: 0.1–0.5 focused; 1.0 default). Applies to every lane.
+    /// journal's words (0.1–0.5 is focused; 1.0 is the default). Applies to every lane.
     @available(macOS 26.0, iOS 26.0, visionOS 26.0, *)
     static let focused = GenerationOptions(temperature: 0.3)
     #endif
@@ -581,7 +581,7 @@ struct ProposeAutonomyTool: Tool {
 #endif
 
 #if canImport(FoundationModels)
-/// The captain's order, from the model's reading of it (T-252). Files nothing: the order
+/// The captain's order, from the model's reading of it. Files nothing: the order
 /// waits for the captain's tap like every other proposal.
 @available(macOS 26.0, iOS 26.0, visionOS 26.0, *)
 struct GiveOrderTool: Tool {
@@ -659,7 +659,7 @@ public final class Conversation: @unchecked Sendable {
     public var lanes: [VoiceLane: String] { BridgeVoice.availability(consent: consent) }
 
     /// Warm the on-device model before the captain's first question (time to first token is
-    /// the cost the captain feels; Axiom pattern 4a). Safe to call any time; a no-op where
+    /// the cost the captain feels). Safe to call any time; a no-op where
     /// the model is not available.
     public func prewarm() {
         #if canImport(FoundationModels)
@@ -738,7 +738,7 @@ public final class Conversation: @unchecked Sendable {
         func hits(_ a: String, _ b: String) -> Bool { a.contains(b) || b.contains(a) }
         // The `fleet` document covers EVERY hull the captain flies. It answers only when the
         // captain asks about the fleet or another hull; otherwise the ship in view is the
-        // subject, so a "where are we" never comes back as both hulls at once (Ian, 2026-09-05:
+        // subject, so a "where are we" never comes back as both hulls at once (2026-09-05:
         // Felix's dialog showed across both PROD hulls with no segregation).
         let asksFleet = words.contains { Conversation.fleetWords.contains($0) }
         let candidates = context.documents.filter { asksFleet || $0.name != "fleet" }
@@ -755,7 +755,7 @@ public final class Conversation: @unchecked Sendable {
 
     /// Ask her. Always answers; the lane says who spoke.
     public func ask(_ question: String) async -> Turn {
-        // AN ORDER IS NOT A QUESTION (T-252). Read deterministically first, on every lane:
+        // AN ORDER IS NOT A QUESTION. Read deterministically first, on every lane:
         // the captain's word becomes the orders waiting for the tap, and the answer is the
         // order read back — never the journal's status, whatever the model would have said.
         if let orders = OrderParser.parse(question) {
@@ -781,7 +781,7 @@ public final class Conversation: @unchecked Sendable {
             """
             let truth = context.truth(floor: floor) + "\n" + (context.hull.map { TemplatedVoice(persona: voice.persona).hullLine($0) } ?? "")
             var notes: [String] = []
-            // THE LADDER (T-253): Private Cloud Compute where the captain allowed it and the
+            // THE LADDER: Private Cloud Compute where the captain allowed it and the
             // process may call it, then the device, then the floor — the same order the report
             // already climbs; until now a QUESTION only ever had the device.
             let onDevice: Bool = { if case .available = SystemLanguageModel.default.availability { return true } else { return false } }()
@@ -794,12 +794,12 @@ public final class Conversation: @unchecked Sendable {
                 }
                 guard let s else { break }
                 let result = await answer(on: s, prompt: prompt, lane: lane)
-                // THE MODEL'S ORDER DECIDES THE TURN (T-254). If `giveOrder` recorded anything
+                // THE MODEL'S ORDER DECIDES THE TURN. If `giveOrder` recorded anything
                 // while the model read the sentence, this was an order in the captain's own
                 // words: the answer is those orders read back — deterministic, never held to
                 // the journal's facts (an order names a station the facts never held) — and
-                // never the status the model might also have written. Ian, 2026-09-20: "the
-                // response is status and something about calling paws. Unacceptable."
+                // never the status the model might also have written. Reported 2026-09-20:
+                // "the response is status and something about calling paws. Unacceptable."
                 let given = voice.peekOrders()
                 if !given.isEmpty {
                     lock.lock(); turnsOnSession += 1; lock.unlock()

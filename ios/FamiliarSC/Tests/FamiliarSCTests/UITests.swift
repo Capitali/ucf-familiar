@@ -198,7 +198,7 @@ final class UITests: XCTestCase {
         XCTAssertFalse(u.named); XCTAssertEqual(u.computer, "(unnamed — `fleet rename` her)")
     }
 
-    /// T-236 finding 8: opening a ship whose captain persona is broken must not leave the
+    /// Opening a ship whose captain persona is broken must not leave the
     /// previously opened captain's voice live. Alice (Purr) opens fine; Bob's persona
     /// throws; after opening Bob nothing of Alice is readable or speakable.
     struct BrokenPersonaFeed: ShipsFeed {

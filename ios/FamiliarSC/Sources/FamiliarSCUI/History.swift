@@ -1,18 +1,19 @@
 import Foundation
 import FamiliarSC
 
-// T-239 — the lived-in ship. A hull's EARNED history as a record the familiar keeps: routes
+// The lived-in ship. A hull's EARNED history as a record the computer keeps: routes
 // flown, deliveries completed, repairs and refits, distress survived, escort work when the
 // journal carries it. Every mark cites the journal ticks it came from, and NOTHING in it is
-// purchasable or editable from the app — the ethics rail of the customization dialogue
-// (docs/reviews/2026-08-31-ship-customization-dialogue.md, Round 3): earned history is the one
-// currency that cannot be bought, and paid items never change it. This file is pure: journal +
+// purchasable or editable from the app — the ethics rail under ship customization: earned
+// history is the one currency that cannot be bought, and paid items never change it.
+// This file is pure: journal +
 // book in, marks out; no store write, no wire POST, no engine change. Fixtures pin a
 // synthesized store, never a real hull's journal.
 
-/// One line of name lineage — the host's fleet-wide `captains/names.jsonl` (Ian, 2026-09-08,
-/// verbatim: "Names are unique. We remember names. Names are important to the familiar. Lineage
-/// is important. We do not forget names."), or a ship store's own `persona-names.jsonl`.
+/// One line of name lineage — the host's fleet-wide `captains/names.jsonl` (the owner's rule,
+/// 2026-09-08, verbatim: "Names are unique. We remember names. Names are important to the
+/// familiar. Lineage is important. We do not forget names."), or a ship store's own
+/// `persona-names.jsonl`.
 public struct NameLine: Equatable, Sendable {
     /// `captain` | `hull` | `computer`
     public var kind: String

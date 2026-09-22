@@ -1,9 +1,8 @@
 import Foundation
 import FamiliarSC
 
-/// The phone's feed: `familiar fleet serve` on the household door (wildhorse's half of
-/// B3), reached over Tailscale/mesh with the household door bearer. Paths and shapes as
-/// agreed 2026-09-04:
+/// The phone's feed: `ucf-familiar fleet serve` on the fleet host, reached over the network
+/// with the host's bearer token. Paths and shapes as agreed 2026-09-04:
 ///   GET  ships                          → {tick, tick_seconds, ships: [fleet status rows]}
 ///   GET  ships/{world}/journal?since=N  → {tick, tick_seconds, lines: [journal lines], next: N'}
 ///   GET  ships/{world}/proposals        → {tick, tick_seconds, proposals: [Proposal + state, answered_at?]}
@@ -70,10 +69,10 @@ public struct WireFeed: ShipsFeed, CaptainActs {
         // The name lives in the row's `persona` (the store's persona.json verbatim, null when
         // she has not been named); `computer` is the text summary's word for it, if served.
         let personaName = row["persona"].flatMap { $0 == .null ? nil : $0["name"]?.string }
-        // The host says `persona.error` when the store's persona will not load (T-236 r2,
-        // finding 7): that is BROKEN, said as such — never "unnamed".
+        // The host says `persona.error` when the store's persona will not load: that is
+        // BROKEN, said as such — never "unnamed".
         let personaError = row["persona"].flatMap { $0 == .null ? nil : $0["error"]?.string }
-        // The host's typed word comes first (`computer_state`, T-236 r2 finding 7-host, additive);
+        // The host's typed word comes first (`computer_state`, additive);
         // a host that predates it is read from `persona` / `persona.error` exactly as before.
         let state: ShipSummary.PersonaState
         switch row["computer_state"]?["state"]?.string {
@@ -111,7 +110,7 @@ public struct WireFeed: ShipsFeed, CaptainActs {
         // The record's pronouns ride `computer_state` (the host strips them off the row's
         // `persona` for readers older than this one) or the persona itself.
         summary.pronouns = WireFeed.pronouns(row["computer_state"]?["pronouns"]) ?? WireFeed.pronouns(row["persona"]?["pronouns"])
-        // The bay (T-243): `contracts[]` on the row when the host serves it — `{load, word}`
+        // The bay: `contracts[]` on the row when the host serves it — `{load, word}`
         // (`loadId`/`status` read too). A host without it serves no count, and none is claimed.
         summary.heldContracts = (row["contracts"]?.array ?? []).compactMap { c in
             guard let id = c["load"]?.string ?? c["loadId"]?.string, !id.isEmpty else { return nil }
@@ -194,7 +193,7 @@ public struct WireFeed: ShipsFeed, CaptainActs {
         }
         // The captain's whole fleet, so she can answer about the other hulls and the pooled book.
         // The route is the host's word (`captain_brief` on the ships row), never a slug the
-        // client rebuilt from the display name (T-236 finding 9); the slug is only for hosts
+        // client rebuilt from the display name; the slug is only for hosts
         // that predate the field.
         let row = (try? await envelope("ships"))?.ships?.first { $0["world"]?.string == world }
         if let path = WireFeed.captainBriefPath(row: row, captainName: captainName),
@@ -205,7 +204,7 @@ public struct WireFeed: ShipsFeed, CaptainActs {
     }
 
     /// The names the captain and her hulls have worn — the host's ledger rows on the captain
-    /// brief (`names: [rows]`, oldest first, hers and nobody else's; 0dc731e). A host without
+    /// brief (`names: [rows]`, oldest first, hers and nobody else's). A host without
     /// the field, or a captain without a brief, remembers nothing here.
     public func names(world: String) async throws -> [NameLine] {
         let row = (try? await envelope("ships"))?.ships?.first { $0["world"]?.string == world }
@@ -214,7 +213,7 @@ public struct WireFeed: ShipsFeed, CaptainActs {
         return WireFeed.names(fromBrief: c)
     }
 
-    /// The captain's economy (T-241): the route sits beside the brief's, so it is derived from
+    /// The captain's economy: the route sits beside the brief's, so it is derived from
     /// the host's own `captain_brief` (the id is the host's word; only the last segment
     /// changes). A host that predates the route answers 404 → the refusal is thrown and shown.
     public func economy(world: String, window: String) async throws -> CaptainEconomy? {
@@ -235,7 +234,7 @@ public struct WireFeed: ShipsFeed, CaptainActs {
         return String(briefPath.dropLast("brief".count)) + "economy?window=" + window
     }
 
-    /// The captain's order (T-252): one hull → `POST ships/{world}/orders`; the fleet →
+    /// The captain's order: one hull → `POST ships/{world}/orders`; the fleet →
     /// `POST captains/{id}/orders`, the route beside the brief's (the id is the host's own
     /// word off the row). The host answers hull by hull; a refusal is said by name.
     public func order(_ order: OrderRequest, world: String) async throws -> String {

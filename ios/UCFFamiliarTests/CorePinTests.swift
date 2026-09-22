@@ -2,9 +2,9 @@ import XCTest
 @testable import UCF_Familiar
 
 /// The checked-in FamiliarCore archive — the pilot's mind as UCF Familiar actually ships it —
-/// says what current doctrine says (codex T-237 B4 r3, finding 2). The Swift package tests
-/// use canned verdicts and never link the archive; the Rust tests exercise source. Both were
-/// green while the archive, built before T-243, ignored `denied` and offered `repair` to a key
+/// says what current doctrine says. The Swift package tests use canned verdicts and never
+/// link the archive; the Rust tests exercise source. Both were green while a stale archive
+/// ignored `denied` and offered `repair` to a key
 /// that could not file it. This test runs the ARCHIVE over the fixtures the Rust side pins
 /// (`wire::seam_parity_tests`, the same two files, read at compile time there).
 final class CorePinTests: XCTestCase {

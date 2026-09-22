@@ -32,10 +32,10 @@ public struct PairingView: View {
 
     public init(model: BridgeModel, scanner: PairingScanner? = nil) { self.model = model; self.scanner = scanner }
 
-    /// The captain the fleet already flies for (one computer per captain — Ian's ruling): a new
-    /// hull joins that captain's computer unless the captain field is changed on purpose.
+    /// The captain the fleet already flies for (one computer per captain — the owner's rule):
+    /// a new hull joins that captain's computer unless the captain field is changed on purpose.
     var fleetCaptain: String? {
-        // Keyed on the IDENTITY, not the label (codex T-237 B2 r2, finding 3): two captains
+        // Keyed on the IDENTITY, not the label: two captains
         // who once wore the same name are two, and a renamed captain is still one.
         let identities = Set(model.ships.map(\.captainIdentity).filter { !$0.hasSuffix(":") })
         let one = identities.count == 1 ? model.ships.first { identities.contains($0.captainIdentity) } : model.ships.first
@@ -70,7 +70,7 @@ public struct PairingView: View {
         NavigationStack {
             Form {
                 Section {
-                    Text("Hand over the key your game minted for this ship. It stays in the ship's own store, never the household's.")
+                    Text("Hand over the key your game minted for this ship. It stays in the ship's own store, never the fleet's.")
                         .font(.footnote).foregroundStyle(.secondary).listRowBackground(Color.clear)
                 }
                 Section("The key") {

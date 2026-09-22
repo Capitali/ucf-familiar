@@ -1,9 +1,8 @@
 import XCTest
 @testable import FamiliarSC
 
-/// The truth boundary binds a statement's verb to its source, not only its numbers (codex
-/// T-237 B2 re-verification, finding 1): the four cases codex named, and the rephrases that
-/// must still pass.
+/// The truth boundary binds a statement's verb to its source, not only its numbers: the
+/// four cases a review named, and the rephrases that must still pass.
 final class GroundingTests: XCTestCase {
     let floor = [
         "t123: bought 40 ore at ask 15 at foxys-diner — ℳ4400",
@@ -31,7 +30,7 @@ final class GroundingTests: XCTestCase {
         XCTAssertNil(Grounding.bind("53 bluefin-reserve sold at t7434 and filled.", to: floor))
     }
 
-    /// Codex r2, finding 1: a second trade at the same berth must not lend its sign. The tick
+    /// A second trade at the same berth must not lend its sign. The tick
     /// is the key; the station is not.
     func testASharedStationCannotDefeatTheTickBoundClaim() {
         let facts = [

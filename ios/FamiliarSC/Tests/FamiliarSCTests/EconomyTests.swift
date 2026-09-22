@@ -2,7 +2,7 @@ import XCTest
 @testable import FamiliarSC
 @testable import FamiliarSCUI
 
-/// T-241, the iPad half: the host's economy answer read as typed history — points, flows as
+/// The iPad half of the economy: the host's answer read as typed history — points, flows as
 /// signed bars, the host's sentences verbatim — the route derived from the host's own
 /// `captain_brief`, and the brief's summary on the fleet document Felix reads.
 final class EconomyTests: XCTestCase {

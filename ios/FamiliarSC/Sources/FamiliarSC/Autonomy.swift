@@ -1,7 +1,7 @@
 import Foundation
 
-// The autonomy dial, read exactly as crates/whisker/src/autonomy.rs writes and reads it —
-// Ian's ruling (2026-09-03): advise / confirm / auto, per control-surface category and
+// The autonomy dial, read exactly as crates/pilot/src/autonomy.rs writes and reads it —
+// the owner's ruling (2026-09-03): advise / confirm / auto, per control-surface category and
 // family. The app SHOWS the dial and lets the captain change it; the change is the captain's
 // act on their tap (the app writes autonomy.json itself), never a model's. This file keeps
 // the precedence and the vocabulary in lockstep with the Rust side — the tests pin both.
@@ -31,10 +31,10 @@ public enum ControlSurface: String, CaseIterable, Equatable, Sendable {
     case marketBuy = "market.buy"
     case marketSell = "market.sell"
     case marketCarry = "market.carry"
-    /// Trading on the credit line (Ian, 2026-09-05: borrowing to speculate is a dial the
+    /// Trading on the credit line (decided 2026-09-05: borrowing to speculate is a dial the
     /// captain owns). Advise by default, like the tanker: an unconfigured captain is
     /// OFFERED the borrow. Missing here until 2026-09-08 — a valid host file carrying it
-    /// read as malformed (codex T-237 B2 re-verification, finding 2).
+    /// read as malformed, which a review pass caught.
     case marketMargin = "market.margin"
     case shipRepair = "ship.repair"
     case shipRefit = "ship.refit"

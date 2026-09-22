@@ -23,10 +23,10 @@ public final class BridgeModel {
     public var window: [MessageItem] = []
     public var dial: DialSheet?
     public var book: ShipBook?
-    /// The hull's earned history (T-239): routes flown, deliveries, repairs, refits, distress
+    /// The hull's earned history: routes flown, deliveries, repairs, refits, distress
     /// survived — computed here from the journal and the book, never served, never editable.
     public var history: ShipHistory?
-    /// The captain's money over a window (T-241) — read when the screen opens, not with the
+    /// The captain's money over a window — read when the screen opens, not with the
     /// bridge: the host reads the exchange's ledger for every hull to answer it.
     public var economy: CaptainEconomy?
     public var economyWindow = "7d"
@@ -35,12 +35,12 @@ public final class BridgeModel {
     public var reports: [FoldReport] = []
     public var spoken: SpokenReport?
     public var pendingDialChanges: [DialChange] = []
-    /// The orders the captain gave in conversation (T-252), waiting for FILE.
+    /// The orders the captain gave in conversation, waiting for FILE.
     public var pendingOrders: [OrderRequest] = []
     /// What the host said when they were filed, or why not.
     public var orderOutcome: String?
-    /// Direct mode: what the pilot's mind would file now, held for the captain's confirm
-    /// (T-237 B4 finding 3). Nil through a host — there the pilot files and proposes itself.
+    /// Direct mode: what the pilot's mind would file now, held for the captain's confirm.
+    /// Nil through a host — there the pilot files and proposes itself.
     public var pilotProposal: PilotProposal?
     /// What the last confirm said — the exchange's clock, or the refusal.
     public var pilotOutcome: String?
@@ -69,14 +69,14 @@ public final class BridgeModel {
     public var summary: ShipSummary? { ships.first { $0.world == world } }
     public var computerName: String { persona?.name ?? summary?.computer ?? "the ship's computer" }
     /// The record's word for the computer — its pronouns, else its name, else `it` — so every
-    /// title on the bridge follows the record, never a default (Ian, 2026-09-09; #6: Felix
+    /// title on the bridge follows the record, never a default (decided 2026-09-09: Felix
     /// chose he/him and build 7 said "her").
     public var spokenOf: SpokenOf { persona?.spokenOf ?? summary?.spokenOf ?? SpokenOf.of(name: nil, pronouns: nil) }
 
     /// A cancelled read is not an error: a view's `.task` is cancelled whenever SwiftUI
     /// tears the view down or a pull-to-refresh supersedes it, and the request it was
     /// awaiting comes back as URLError.cancelled (NSURLErrorDomain -999). The last good
-    /// state stays on screen; nothing is reported (Ian's iPad, 2026-09-04).
+    /// state stays on screen; nothing is reported (seen on an iPad, 2026-09-04).
     static func isCancellation(_ error: Error) -> Bool {
         if error is CancellationError { return true }
         if let u = error as? URLError, u.code == .cancelled { return true }
@@ -114,8 +114,8 @@ public final class BridgeModel {
     }
 
     /// Every `open` takes a generation; a read that resumes under a later generation
-    /// publishes nothing (codex T-236 r3, finding 8: two overlapping opens had no token, so
-    /// either could resume after the other and publish its persona under the later world).
+    /// publishes nothing: two overlapping opens had no token, so either could resume after
+    /// the other and publish its persona under the later world.
     private var openGeneration = 0
     /// The lane that answers a question — the conversation's own `ask`. A seam so a test can
     /// hold an answer in flight across a ship switch; production never reassigns it.
@@ -126,7 +126,7 @@ public final class BridgeModel {
         // Switching ships: nothing of the previous captain may be readable or speakable under
         // the new world for even the length of a read. The voice is cleared BEFORE the world
         // is published and the reads begin; a failed open then has nothing to expose, and
-        // `ask` is gated on the conversation's world besides (codex T-236 r2, finding 8).
+        // `ask` is gated on the conversation's world besides.
         // A refresh of the SAME ship keeps its voice while the reads run.
         if self.world != world { await MainActor.run { clearVoice() } }
         self.world = world
@@ -136,9 +136,8 @@ public final class BridgeModel {
         defer { if gen == openGeneration { loading = false } }
         // Read the whole bridge into locals and publish only once every required read
         // has succeeded. A broken captain persona on the newly selected ship (the host
-        // refuses to fall through, T-236) must not leave the PREVIOUS captain's name,
-        // conversation, journal or context live under this ship's summary (codex, T-236
-        // re-verification finding 8).
+        // refuses to fall through) must not leave the PREVIOUS captain's name,
+        // conversation, journal or context live under this ship's summary.
         do {
             let p = try await feed.persona(world: world)
             guard gen == openGeneration else { return }
@@ -174,7 +173,7 @@ public final class BridgeModel {
             } else {
                 conversationWorld = world
                 conversation = Conversation(voice: BridgeVoice(persona: persona ?? Persona(name: computerName, style: nil)), context: ctx, consent: voiceConsent)
-                // Warm the model before the first question (T-253).
+                // Warm the model before the first question.
                 conversation?.prewarm()
                 turns = []
             }
@@ -187,7 +186,7 @@ public final class BridgeModel {
         }
     }
 
-    /// Read the captain's economy for the open ship (T-241). A window given here becomes the
+    /// Read the captain's economy for the open ship. A window given here becomes the
     /// screen's; a stale open's answer is dropped like every other read's.
     public func loadEconomy(window: String? = nil) async {
         guard let world else { return }
@@ -251,7 +250,7 @@ public final class BridgeModel {
         let turn = await asker(c, q)
         // The gate again, AFTER the answer: this actor is re-entrant at the await, and a ship
         // switch in the meantime cleared the voice. The previous captain's answer must not be
-        // appended or spoken under the new ship (codex T-236 r3, finding 8).
+        // appended or spoken under the new ship.
         guard world == askedWorld, conversationWorld == askedWorld, conversation === c else { return }
         turns.append(turn)
         let given = c.voice.takeOrders()

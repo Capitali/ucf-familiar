@@ -2,7 +2,7 @@ import Foundation
 
 // The bridge report and its deterministic floor. `BridgeReport` is the only shape the UI
 // renders — headline, facts, next act, mood — whether the templated renderer or Apple
-// Intelligence produced it. The renderer is the T-236 brick-2 discipline made Swift: one
+// Intelligence produced it. The renderer holds one discipline: one
 // fixture plus one persona renders byte-identically; style changes phrasing, never event
 // order, amounts, ids, ticks, refusal reasons or severity; unknown events render neutrally;
 // humor reads as zero around danger, loss, refusal or uncertainty.
@@ -106,9 +106,9 @@ public struct TemplatedVoice {
     // MARK: the report
 
     public func report(entries: [JournalEntry], hull: HullGlance? = nil, openProposals: Int = 0) -> BridgeReport {
-        // A distress the hull has since climbed out of is history, not a fact of NOW (Ian's
-        // iPad, 2026-09-20: "under way with fuel 534/600" and, in the same breath, a DISTRESS
-        // HOLD from before the refuel). It stays in the journal; it leaves the report.
+        // A distress the hull has since climbed out of is history, not a fact of NOW (reported
+        // from a bridge, 2026-09-20: "under way with fuel 534/600" and, in the same breath, a
+        // DISTRESS HOLD from before the refuel). It stays in the journal; it leaves the report.
         let entries = TemplatedVoice.withoutResolvedDistress(entries, hull: hull)
         let chatter = entries.filter { TemplatedVoice.severity($0) == 0 }.count
         let told = TemplatedVoice.collapse(entries.filter { TemplatedVoice.severity($0) > 0 })
@@ -223,9 +223,9 @@ public struct TemplatedVoice {
     }
 
     /// The quiet folds, told by REASON, once each: the captain wants "she is saving for the
-    /// hold extension" once, not four hundred times (wildhorse, 2026-09-03). The fold count
-    /// rides along per reason so nothing is lost; the same reason at a different amount is
-    /// one reason.
+    /// hold extension" once, not four hundred times (seen on a real journal, 2026-09-03).
+    /// The fold count rides along per reason so nothing is lost; the same reason at a
+    /// different amount is one reason.
     func chatterLine(entries: [JournalEntry], count: Int) -> String {
         var order: [String] = []
         var counts: [String: Int] = [:]
@@ -303,7 +303,7 @@ public struct TemplatedVoice {
         case "under-orders":
             return "\(t(e)): under the captain's orders (\(s("course"))) — the doctrine would \(s("would")) and files nothing of its own"
         case "tour":
-            // The plan's books (T-243 slice 4): every leg, what rides it, what is due at its end.
+            // The plan's books: every leg, what rides it, what is due at its end.
             let legs = e["legs"]?.array?.compactMap { leg -> String? in
                 guard let from = leg["from"]?.string, let to = leg["to"]?.string else { return nil }
                 let aboard = leg["aboard"]?.array?.compactMap(\.string) ?? []

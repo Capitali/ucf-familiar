@@ -1,12 +1,12 @@
 import Foundation
 
-// The ship store — one directory per paired hull (ADR-0045: worlds are stores). This file
+// The ship store — one directory per paired hull; a world is a store. This file
 // reads it; nothing here writes it. The contract is the Rust side's own types:
-// crates/kernel/src/persona.rs (persona.json, persona-names.jsonl), crates/cli/src/fleet.rs
-// (captain.json, automations.json), crates/whisker/src/trade.rs::Holding (holdings.json),
-// crates/whisker/src/outfit.rs::DeliveryStat (deliveries.jsonl), crates/whisker/src/
+// crates/persona/src/persona.rs (persona.json, persona-names.jsonl), crates/cli/src/fleet.rs
+// (captain.json, automations.json), crates/pilot/src/trade.rs::Holding (holdings.json),
+// crates/pilot/src/outfit.rs::DeliveryStat (deliveries.jsonl), crates/pilot/src/
 // autonomy.rs (autonomy.json, proposals.jsonl, approvals.jsonl) and the journal vocabulary
-// in crates/whisker/src/main.rs.
+// in crates/pilot/src/main.rs.
 
 public enum StoreError: Error, Equatable, CustomStringConvertible {
     case missing(String)
@@ -86,7 +86,7 @@ public struct Pronouns: Codable, Equatable, Sendable {
 }
 
 /// The words a shell uses FOR the computer: the record's pronouns, else the name, else `it`
-/// (Ian, 2026-09-09: "Her voice / Her brains / Her story" become the record's word or the
+/// (decided 2026-09-09: "Her voice / Her brains / Her story" become the record's word or the
 /// name — "she" was never ruled, it slid in by imitation). Titles use the capitalised forms.
 public struct SpokenOf: Equatable, Sendable {
     public var subject: String
@@ -129,9 +129,10 @@ public struct Persona: Codable, Equatable, Sendable {
     /// How the computer is spoken of — the familiar's choice at naming; absent until named.
     public var pronouns: Pronouns? = nil
 
-    /// The root every ship's computer descends from (ADR-0037) — written EXACTLY.
+    /// The root every ship's computer descends from — written EXACTLY.
     public static let rootName = "Purr"
-    /// The household loader's default, which a ship must never borrow (T-236 brick 1).
+    /// The loader's fallback name, which a ship must never borrow: a ship that has not been
+    /// named says so rather than answering to a default.
     public static let householdDefaultName = "the familiar"
     static let knownKeys: Set<String> = ["persona_version", "name", "role", "register", "world", "style", "pronouns"]
     static let knownStyleKeys: Set<String> = ["warmth", "formality", "humor", "sentence_length", "contractions", "vocabulary", "greeting", "form_of_address"]
@@ -213,7 +214,7 @@ public struct Captain: Codable, Equatable, Sendable {
     /// The captain's IDENTITY (fleet.rs `captain_id`): generated once, meaningless, the only
     /// thing anything keys on. Empty ONLY on a record written before it existed — the host's
     /// `ensure_captain_id` fills it in. A display name is a label and may collide or change;
-    /// this does neither (codex T-237 B2 re-verification, finding 3).
+    /// this does neither.
     public var captainID: String = ""
     public var captain: String
     public var keyID: String
@@ -416,8 +417,8 @@ public struct ShipStore {
         }
     }
 
-    /// The computer's persona. A ship paired before T-236 has no file: `nil` — the caller
-    /// says "unnamed" rather than borrowing the household default. A malformed file THROWS.
+    /// The computer's persona. A ship paired before personas existed has no file: `nil` — the
+    /// caller says "unnamed" rather than borrowing the loader's fallback. A malformed file THROWS.
     public func persona() throws -> Persona? {
         guard has("persona.json") else { return nil }
         return try Persona.decode(try data("persona.json"))

@@ -2,8 +2,8 @@ import SwiftUI
 import Charts
 import FamiliarSC
 
-/// Money over time — the captain's economic history and profit, pooled across his hulls
-/// (T-241). Read-only: the host's points, the host's flows, the host's sentences. The trend
+/// Money over time — the captain's economic history and profit, pooled across his hulls.
+/// Read-only: the host's points, the host's flows, the host's sentences. The trend
 /// is a straight line through what happened, and the screen says so.
 struct EconomyView: View {
     @Bindable var model: BridgeModel

@@ -80,7 +80,7 @@ struct ShipRow: View {
                 // The hull's TITLE as the exchange holds it — owned, or leased with the balance —
                 // and, separately, the familiar's own authority grant for its pilot (renewed
                 // daily by `fleet run --renew`). The grant used to read "lease 19h" on every
-                // row, KBC-03's included, the morning after it took title (Ian, 2026-09-17).
+                // row, KBC-03's included, the morning after it took title (2026-09-17).
                 if let t = ship.titleWord { Chip(text: t, tint: ship.titled == true ? SC.green : SC.dim) }
                 if let h = ship.leaseHoursLeft { Chip(text: h < 0 ? "AUTHORITY EXPIRED" : "authority \(h)h", tint: h <= 4 ? SC.amber : SC.dim) }
                 if let d = ship.docked { Chip(text: "at \(d)") } else if let to = ship.enRouteTo { Chip(text: "→ \(to)") } else { Chip(text: "under way") }

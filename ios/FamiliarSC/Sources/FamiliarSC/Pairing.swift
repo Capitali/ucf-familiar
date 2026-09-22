@@ -2,8 +2,8 @@ import Foundation
 
 // Pairing: the captain scans or pastes a key (a co-pilot key once ucf-exchange#15 mints
 // them; a plain trading key pairs the same way, which is how KK II flies today). The
-// package validates the key's SHAPE and the request; the pairing itself is `familiar fleet
-// pair`, run by the SC runtime — the key reaches it through a file, never argv, so no
+// package validates the key's SHAPE and the request; the pairing itself is `ucf-familiar
+// fleet pair`, run by the SC runtime — the key reaches it through a file, never argv, so no
 // secret ever sits in a process list or a log.
 
 public enum PairingError: Error, Equatable, CustomStringConvertible {
@@ -67,9 +67,9 @@ public enum Automation: String, CaseIterable, Codable, Equatable, Sendable {
 public struct PairingRequest: Equatable, Sendable {
     public var label: String
     public var captain: String
-    /// The durable id of the captain this hull joins, when the fleet already knows it
-    /// (codex T-237 B2 r2, finding 3): the host then joins the RECORD, never a label that
-    /// happens to match. Nil for a captain the fleet has not met.
+    /// The durable id of the captain this hull joins, when the fleet already knows it: the
+    /// host then joins the RECORD, never a label that happens to match. Nil for a captain
+    /// the fleet has not met.
     public var captainID: String?
     public var server: String
     public var automations: [Automation]
@@ -89,7 +89,7 @@ public struct PairingRequest: Equatable, Sendable {
         return nil
     }
 
-    /// The `familiar fleet pair` argv the SC runs. The key rides in `keyFile` (0600), so
+    /// The `ucf-familiar fleet pair` argv the SC runs. The key rides in `keyFile` (0600), so
     /// this array is safe to log verbatim.
     public func fleetPairArguments(keyFile: String) -> [String] {
         var a = ["fleet", "pair", "--label", label, "--captain", captain, "--server", server, "--key-file", keyFile]

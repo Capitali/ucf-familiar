@@ -4,8 +4,8 @@ import Foundation
 @testable import FamiliarSCUI
 
 /// A mock exchange under `ExchangeClient.session`: every GET answered from a fixture by path
-/// (query included), every POST recorded byte for byte. The tests below are the ones codex
-/// asked for on T-237 B4 (re-verification 2026-09-08): the gather carries the world's rung
+/// (query included), every POST recorded byte for byte. The tests below are the ones a
+/// review asked for (2026-09-08): the gather carries the world's rung
 /// prices and the captain's live contract; rendering and speaking file NOTHING; cancelling
 /// files nothing; one confirm files exactly one correctly shaped POST with the id the
 /// proposal was shown under; a mind that moved refuses; a seam this shell was not built
@@ -165,7 +165,7 @@ final class DirectPilotTests: XCTestCase {
         XCTAssertEqual(input["active"]?["row"]?["loadId"]?.string, "L3249")
         XCTAssertEqual(input["active"]?["row"]?["status"]?.string, "inTransit")
         XCTAssertNil(input["active"]?["word"], "the seam reads the ledger word from /v1/me.freight, as the host does")
-        // T-243, the bay: every OTHER open row on the captain's board rides as `contracts[]`,
+        // The bay: every OTHER open row on the captain's board rides as `contracts[]`,
         // `{row}` only — the seam takes each word from the ledger and drops a settled one; the
         // active is never listed twice. This key holds `act`, so nothing is denied.
         let bay = try XCTUnwrap(input["contracts"]?.array)
@@ -347,9 +347,9 @@ final class DirectPilotTests: XCTestCase {
         let shown = try await f.pilotProposal(world: "w")
         let p = try XCTUnwrap(shown, "a good read shows the act")
         let asked = mind.inputs.count
-        // A 500, non-JSON, and — codex r3 finding 1 — VALID JSON of the wrong shape: an HTTP-200
-        // object, `null`, a scalar. Each used to be an empty board; each must be a named failure.
-        // …and (codex r4) an array whose member is not a row: the ledger's id alone, a row
+        // A 500, non-JSON, and VALID JSON of the wrong shape: an HTTP-200 object, `null`,
+        // a scalar. Each used to be an empty board; each must be a named failure.
+        // …and an array whose member is not a row: the ledger's id alone, a row
         // without a destination, a bare string in the array.
         let bad: [(Int, String)] = [(500, "{\"error\":\"fold in progress\"}"), (200, "this is not json"),
                                     (200, "{\"error\":\"temporarily unavailable\"}"), (200, "null"), (200, "\"[]\""), (200, "7"),
@@ -441,7 +441,7 @@ final class DirectPilotTests: XCTestCase {
         XCTAssertNil(ExchangeAct.from(decision: d(#"{"type":"hold","why":"under way"}"#), docked: nil))
         XCTAssertNil(ExchangeAct.from(decision: d(#"{"type":"sell","station":"a","good":"catnip","units":9}"#), docked: "a"), "not on the allowlist, whatever a verdict says")
         XCTAssertNil(ExchangeAct.from(decision: d(#"{"type":"book"}"#), docked: "a"))
-        // Bodies are the host runner's (whisker/src/main.rs).
+        // Bodies are the host runner's (crates/pilot/src/main.rs).
         XCTAssertEqual(ExchangeAct.callPaws.body, ["type": .string("paws")])
         XCTAssertEqual(ExchangeAct.collect(loadId: "L2").body, ["type": .string("collect"), "loadId": .string("L2")])
         XCTAssertEqual(ExchangeAct.travel(station: "x", serviceClass: nil).body, ["type": .string("travel"), "station": .string("x")])

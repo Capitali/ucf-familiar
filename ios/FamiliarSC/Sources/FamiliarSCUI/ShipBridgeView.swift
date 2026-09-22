@@ -129,7 +129,7 @@ public struct ShipBridgeView: View {
                 if let h = s.leaseHoursLeft { Chip(text: h < 0 ? "LEASE EXPIRED" : "lease \(h)h", tint: h <= 4 ? SC.amber : SC.dim) }
                 if let d = s.docked { Chip(text: "at \(d)") } else if let to = s.enRouteTo { Chip(text: "→ \(to)") } else { Chip(text: "under way") }
             }
-            // The bay (T-243): what the ledger holds open, at its word — the hull may hold three.
+            // The bay: what the ledger holds open, at its word — the hull may hold three.
             if !s.heldContracts.isEmpty {
                 Text("Your contracts · \(s.heldContracts.count): " + s.heldContracts.map { "\($0.loadId) \($0.word)" }.joined(separator: ", "))
                     .font(.caption.monospacedDigit()).foregroundStyle(SC.ice)
@@ -160,7 +160,7 @@ public struct ShipBridgeView: View {
 /// Direct mode: the act the pilot's mind would file, held for the captain. Confirm files it
 /// in the captain's name from this device (the mind is asked again first); Not now drops it.
 /// Both taps ≥44pt. Nothing on this row is reachable by the voice.
-/// The captain's orders as read from what they said (T-252), and the one tap that files
+/// The captain's orders as read from what they said, and the one tap that files
 /// them. The pilots then fly them ahead of their own doctrine and hold until the next word.
 struct OrdersRow: View {
     @Bindable var model: BridgeModel
@@ -244,7 +244,7 @@ struct AdviceLine: View {
     }
 }
 
-/// Her story — the hull's earned history (T-239). Read-only by construction: there is no
+/// Her story — the hull's earned history. Read-only by construction: there is no
 /// act on this screen, and no act anywhere that changes a mark.
 struct HistoryView: View {
     @Bindable var model: BridgeModel

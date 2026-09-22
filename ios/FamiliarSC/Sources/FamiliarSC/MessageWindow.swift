@@ -1,6 +1,6 @@
 import Foundation
 
-// The message window (dialogue §3.5): the journal's advice and proposal lines, joined with
+// The message window: the journal's advice and proposal lines, joined with
 // proposals.jsonl ∪ approvals.jsonl so each proposal shows its state — open, approved,
 // denied, lapsed. The persona voices these; the app's approve/deny buttons write the
 // approval line (the captain's act). This is the feed; it never decides anything.

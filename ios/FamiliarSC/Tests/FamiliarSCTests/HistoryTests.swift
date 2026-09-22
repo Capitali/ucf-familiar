@@ -2,7 +2,7 @@ import XCTest
 @testable import FamiliarSC
 @testable import FamiliarSCUI
 
-/// T-239: from a hull's journal and book alone, the earned-history record — every mark citing
+/// From a hull's journal and book alone, the earned-history record — every mark citing
 /// its ticks, nothing purchasable or editable. The fixture store is synthesized (never a real
 /// hull's journal).
 final class HistoryTests: XCTestCase {
@@ -36,7 +36,7 @@ final class HistoryTests: XCTestCase {
         XCTAssertTrue(h.story.hasSuffix("it is what she did, and the names are not forgotten."))
     }
 
-    /// Names are lineage (Ian, 2026-09-08): the store's naming trail and the host's ledger both
+    /// Names are lineage (the owner's rule, 2026-09-08): the store's naming trail and the host's ledger both
     /// become marks, dated, never forgotten — and a rename's refusal is the host's sentence.
     func testNamesAreLineageAndARefusedRenameIsSaidNotRetried() async throws {
         let names = Fixtures.store.namings().map(NameLine.init(naming:))

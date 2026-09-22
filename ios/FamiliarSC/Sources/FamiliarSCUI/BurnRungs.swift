@@ -1,7 +1,7 @@
 import Foundation
 import FamiliarSC
 
-// The burn rungs, ported from crates/whisker/src/doctrine.rs (2161a55): the exchange prices
+// The burn rungs, ported from crates/pilot/src/doctrine.rs: the exchange prices
 // four throttles and each is a real trade — time goes as 1/√a and propellant follows the
 // rocket equation on a Δv that goes as √a. Standard FIRST, always; economy only when standard
 // cannot reach; never up. Under a contract the LOAD's class governs every leg, so the rung

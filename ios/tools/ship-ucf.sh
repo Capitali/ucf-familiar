@@ -1,7 +1,7 @@
 #!/bin/bash
 # ship-ucf.sh <build-number> — archive → export (App Store) → upload UCF Familiar to TestFlight.
 # UCF Familiar (scheme UCFFamiliar, bundle io.river.familiar.ucf). Needs the App
-# Store Connect record for that bundle id (Ian's act, once) and the same ASC key ship.sh uses.
+# Store Connect record for that bundle id (the owner's act, once) and an App Store Connect key.
 # Xcode must be one App Store Connect accepts (26.x until an Xcode 27 RC exists).
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -28,9 +28,9 @@ cd "$REPO"
 git add ios/project.yml
 git diff --cached --quiet || git commit -m "UCF Familiar build $BUILD
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
-# Rebase before pushing, for the reason ship.sh carries the same line: a rejected
-# push under `set -e` kills the ship between claiming the build number in git and
-# building anything, leaving the number burned and nothing on TestFlight. Two Macs
+# Rebase before pushing: a rejected push under `set -e` kills the ship between
+# claiming the build number in git and building anything, leaving the number
+# burned and nothing on TestFlight. Two Macs
 # and several sessions land on this repo now; a racing push is the normal case.
 git pull --rebase --autostash --quiet origin "$(git branch --show-current)"
 git push origin "$(git branch --show-current)" 2>&1 | tail -1
@@ -49,7 +49,7 @@ cat > /tmp/UCFFamiliar-export.plist <<PLIST
 <plist version="1.0"><dict>
   <key>method</key><string>app-store-connect</string>
   <key>teamID</key><string>8GHXL328AR</string>
-  <!-- Manual signing, as ship.sh learned the hard way: this key cannot do cloud-managed
+  <!-- Manual signing, learned the hard way: this key cannot do cloud-managed
        distribution ("Cloud signing permission error"), so we pin the Apple Distribution
        cert and the App Store profile created for this bundle through the ASC API. -->
   <key>signingStyle</key><string>manual</string>
@@ -71,11 +71,11 @@ KEEP="$HOME/Library/Developer/Xcode/Archives/$(date +%Y-%m-%d)/UCFFamiliar $BUIL
 mkdir -p "$(dirname "$KEEP")" && cp -R "$ARCHIVE" "$KEEP" && echo "✓ archive kept at $KEEP"
 echo "✓ UCF Familiar $BUILD uploaded — TestFlight after processing"
 
-# Direct install to the household's own devices, exactly as ship.sh does for the
-# other app. Without this the standalone ship's computer reached a device ONLY via
-# TestFlight, so it was invisible on the iPad while every FamiliarAgent build walked
-# straight on (Ian, 2026-09-07: "don't see it deployed to iPad"). Everything on
-# Apple's side was correct — three VALID builds, in beta testing, iPhone AND iPad in
+# Direct install to the developer's own devices. Without this the standalone ship's
+# computer reached a device ONLY via TestFlight, so it was invisible on the iPad
+# while every build of the sibling app walked straight on (reported 2026-09-07:
+# "don't see it deployed to iPad"). Everything on Apple's side was correct —
+# three VALID builds, in beta testing, iPhone AND iPad in
 # UIDeviceFamily — and the app still was not on the device, because nothing ever put
 # it there. Discover what is actually paired rather than trusting a hardcoded list,
 # and say WHY when an install fails.
@@ -94,9 +94,9 @@ for d in devs:
 ' 2>/dev/null || true)
 
 # The archive is App Store-signed, and an App Store profile carries no devices — it
-# installs nowhere. ship.sh has always done a SEPARATE development build for the
-# direct install and archived separately for Apple; this script only ever archived,
-# which is the whole reason the standalone app never reached a device on its own.
+# installs nowhere. The direct install needs a SEPARATE development build, with
+# the archive kept separately for Apple; this script only ever archived, which is
+# the whole reason the standalone app never reached a device on its own.
 # Automatic signing with the ASC key mints the development profile as needed.
 if ! xcodebuild -project UCFFamiliar.xcodeproj -scheme UCFFamiliar -configuration Release \
   -destination 'generic/platform=iOS' -allowProvisioningUpdates \

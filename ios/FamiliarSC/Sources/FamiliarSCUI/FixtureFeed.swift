@@ -3,7 +3,7 @@ import FamiliarSC
 
 /// An in-memory fleet for previews and for the phone until `fleet serve` is live: a
 /// synthesized journal in the pilot's vocabulary (no captain's real record), one ship
-/// named Purr with a proposal waiting, one unnamed ship paired before T-236.
+/// named Purr with a proposal waiting, one unnamed ship paired before personas existed.
 public struct FixtureFeed: ShipsFeed, CaptainActs {
     public final class Box: @unchecked Sendable {
         var approvals: [String: [Approval]] = [:]

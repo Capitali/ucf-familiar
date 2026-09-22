@@ -30,7 +30,7 @@
 	<key>NSCameraUsageDescription</key>
 	<string>To scan an exchange key or a fleet feed as a QR code.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>To reach a familiar host or a development exchange on your own network.</string>
+	<string>To reach a fleet host or a development exchange on your own network.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>So you can talk to your ship's computer. Speech is transcribed on this device and never leaves it.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>

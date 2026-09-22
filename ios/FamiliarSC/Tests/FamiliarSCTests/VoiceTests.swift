@@ -1,14 +1,14 @@
 import XCTest
 @testable import FamiliarSC
 
-/// The templated floor (T-236 brick-2 discipline) and the grounding check that every
+/// The templated floor and the grounding check that every
 /// spoken report must pass: same fixture + same persona = same bytes; style changes phrasing,
 /// never facts; danger silences humor; the model may not invent or soften.
 final class VoiceTests: XCTestCase {
     var persona: Persona { try! Fixtures.store.persona()! }
     var entries: [JournalEntry] { Fixtures.journal().entries }
 
-    /// A distress the hull climbed out of is not a fact of now (Ian's iPad, 2026-09-20): the
+    /// A distress the hull climbed out of is not a fact of now (from an iPad, 2026-09-20): the
     /// hold at t15167, the divert at t15180, the refuel at t15184, the tank at 534/600 — the
     /// report says the refuel, not the hold. With the tank still low, the hold stays.
     func testAResolvedDistressLeavesTheReport() {
@@ -34,7 +34,7 @@ final class VoiceTests: XCTestCase {
         XCTAssertTrue(voice.report(entries: [entries[0]], hull: full).facts.joined(separator: "\n").contains("DISTRESS"))
     }
 
-    /// T-253: the lanes a question climbs — PCC only when the captain said yes AND the process
+    /// The lanes a question climbs — PCC only when the captain said yes AND the process
     /// is entitled (an unentitled process reports PCC available and then dies on the first
     /// call), then the device, then the floor; and the words the settings screen shows for
     /// why a lane is closed.

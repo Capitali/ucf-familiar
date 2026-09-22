@@ -2,9 +2,9 @@ import XCTest
 @testable import FamiliarSC
 @testable import FamiliarSCUI
 
-/// T-236 brick 1, codex round 2, the Swift findings: a broken persona is BROKEN in the fleet
-/// row, never "unnamed" (7); and while a ship is being opened — or after that open fails —
-/// nothing of the previous captain is readable or speakable under the new world (8).
+/// The Swift half of persona isolation: a broken persona is BROKEN in the fleet row, never
+/// "unnamed"; and while a ship is being opened — or after that open fails — nothing of the
+/// previous captain is readable or speakable under the new world.
 final class T236SwiftTests: XCTestCase {
     func testABrokenPersonaOnTheShipsRowIsSaidAsBrokenNotUnnamed() throws {
         func row(_ persona: String) throws -> ShipSummary {
@@ -42,7 +42,7 @@ final class T236SwiftTests: XCTestCase {
     }
 
     /// The row's `computer_state.pronouns` (where the host carries them while it strips the
-    /// persona for older readers) and `contracts[]` (T-243) are read; a host without them
+    /// persona for older readers) and `contracts[]` are read; a host without them
     /// serves nothing and nothing is claimed.
     func testPronounsAndTheBayAreReadOffTheRow() throws {
         func row(_ extra: String) throws -> ShipSummary {
@@ -98,7 +98,7 @@ final class T236SwiftTests: XCTestCase {
         func book(world: String) async throws -> ShipBook { try await inner.book(world: world) }
     }
 
-    /// codex T-236 r3, finding 8 (the reentrancy half): an answer that was in flight when the
+    /// The reentrancy half: an answer that was in flight when the
     /// captain switched ships is neither appended nor spoken under the new ship; an answer
     /// that lands with no switch still is.
     func testAnAnswerInFlightAcrossAShipSwitchIsDropped() async throws {
@@ -126,7 +126,7 @@ final class T236SwiftTests: XCTestCase {
         XCTAssertEqual(model.turns.first?.question, "status")
     }
 
-    /// codex T-236 r3, finding 8 (the overlapping-open half): two opens race; the one that
+    /// The overlapping-open half: two opens race; the one that
     /// resumes last must not publish its persona under the later selection. Only the newest
     /// open publishes, and `loading` reflects it.
     func testAnOlderOpenThatResumesLastPublishesNothing() async throws {

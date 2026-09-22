@@ -35,7 +35,7 @@ public struct AutonomyDialView: View {
         Form {
             Section {
                 // No pronoun here: the computer chose its own (persona.pronouns) and this surface
-                // does not yet read them — Felix chose he/him and build 7 said "her" (#6). Until
+                // does not yet read them — Felix chose he/him and build 7 said "her". Until
                 // the pronoun plumbing lands across FamiliarSCUI, speak by name.
                 Text("What \(model.computerName) may do unasked. Advise says it; confirm asks you; auto does it and tells you.")
                     .font(.footnote).foregroundStyle(.secondary).listRowBackground(Color.clear)

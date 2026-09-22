@@ -2,7 +2,7 @@ import SwiftUI
 import FamiliarSC
 
 /// The captain's bridge, one path: the ships, then a ship — and that screen IS Felix.
-/// No tabs, no doors, no overlays (Ian, 2026-09-04: "simple and elegant").
+/// No tabs, no doors, no overlays (2026-09-04: "simple and elegant").
 public struct SCRootView: View {
     @Bindable var model: BridgeModel
     let scanner: PairingScanner?
@@ -10,8 +10,7 @@ public struct SCRootView: View {
     let fixtureNote: String?
     /// A host's one control on the fleet screen (UCF Familiar's connection picker). It rides
     /// in the navigation bar with the stack's own items, so it can never be drawn over them:
-    /// TestFlight build 7 floated it as an overlay and it landed on top of "Pair a ship"
-    /// (Capitali/familiar#6).
+    /// TestFlight build 7 floated it as an overlay and it landed on top of "Pair a ship".
     let hostItem: AnyView?
 
     public init(model: BridgeModel, scanner: PairingScanner? = nil, onClose: (() -> Void)? = nil, fixtureNote: String? = nil) {

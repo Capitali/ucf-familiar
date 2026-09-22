@@ -3,7 +3,7 @@ import FamiliarSC
 
 // The captain's bridge reads one feed and performs a few acts. The feed is a protocol so the
 // same screens run over ship stores on the host (the Mac, a fixture in previews) and over
-// `familiar fleet serve` on the phone (the wire, wildhorse's half of B3). Every act here is
+// `ucf-familiar fleet serve` on the phone (the wire). Every act here is
 // the CAPTAIN's — approve/deny a proposal, set the dial, pair or unpair — done on a tap;
 // nothing in these screens lets a model perform one.
 
@@ -16,8 +16,8 @@ public struct ShipSummary: Identifiable, Equatable, Sendable {
     public var named: Bool
     /// The computer's persona as the host or store holds it: named, never named, or BROKEN
     /// with the loader's reason. Broken is not absent — a row that reads "unnamed" for a
-    /// persona the kernel refuses hides the breakage in the fleet list until the ship is
-    /// opened (codex T-236 re-verification r2, finding 7). Rendered distinctly everywhere.
+    /// persona the loader refuses hides the breakage in the fleet list until the ship is
+    /// opened. Rendered distinctly everywhere.
     public enum PersonaState: Equatable, Sendable { case named(String), absent, broken(String) }
     public var personaState: PersonaState = .absent
     public var hull: String
@@ -63,7 +63,7 @@ public struct ShipSummary: Identifiable, Equatable, Sendable {
     }
     /// The merchant's book as `fleet status` computes it from receipts ∪ journal (wire only).
     public var trades: TradeBook?
-    /// A contract the hull holds and the ledger's word for it (T-243, the bay): the host's row
+    /// A contract the hull holds and the ledger's word for it (the bay): the host's row
     /// `contracts[]` when it serves one; in direct mode the ledger's own open loads.
     public struct HeldContract: Equatable, Sendable {
         public var loadId: String
@@ -77,7 +77,7 @@ public struct ShipSummary: Identifiable, Equatable, Sendable {
     /// The words a shell uses for this ship's computer: the record's, the name's, or `it`.
     public var spokenOf: SpokenOf { SpokenOf.of(name: named ? computer : nil, pronouns: pronouns) }
     /// The WORLD INSTANCE the ship flies in (PROD, LOCAL, TEST…) — the exchange's name for
-    /// itself, never part of the ship's name (Ian, 2026-09-04: "those are instance names of
+    /// itself, never part of the ship's name (settled 2026-09-04: "those are instance names of
     /// the world not ship names"). Served as `world_name` when the host has it; else derived.
     public var worldName: String?
 
@@ -119,7 +119,7 @@ public struct ShipSummary: Identifiable, Equatable, Sendable {
     }
 }
 
-/// The merchant's book (`fleet status --json` → `trades`, wildhorse 1d4d098): realized P&L by
+/// The merchant's book (`fleet status --json` → `trades`): realized P&L by
 /// FIFO cost, with its two honesty marks — units sold with no lot behind them are SET ASIDE,
 /// never counted in `realized`; lots whose basis is the pilot's own quoted ask (not a fill
 /// receipt) make the profit they imply a CEILING.
@@ -133,7 +133,7 @@ public struct TradeBook: Equatable, Sendable {
     public var unmatchedUnits: Int64 = 0
     public var unmatchedProceeds: Int64 = 0
     public var quotedBasisLots: Int64 = 0
-    /// The merchant's own judgment, measured (wildhorse 110e217): for every position opened
+    /// The merchant's own judgment, measured: for every position opened
     /// and later closed, what the buy rule promised against what the folds paid.
     public var closedPositions: Int64 = 0
     public var expectedMargin: Int64 = 0
@@ -211,11 +211,11 @@ public protocol ShipsFeed: Sendable {
     func dial(world: String) async throws -> DialSheet
     func book(world: String) async throws -> ShipBook
     /// The names this ship and her people have worn — the store's naming trail, or the host's
-    /// fleet-wide ledger when it serves it. Empty where nothing is remembered (Ian, 2026-09-08:
-    /// "We do not forget names").
+    /// fleet-wide ledger when it serves it. Empty where nothing is remembered (the owner's
+    /// rule, 2026-09-08: "We do not forget names").
     func names(world: String) async throws -> [NameLine]
     /// The captain's money over a window (`24h` | `7d` | `30d`): every hull he flies and the
-    /// pool, with points, from the host's `/captains/{id}/economy` (T-241). Nil where the feed
+    /// pool, with points, from the host's `/captains/{id}/economy`. Nil where the feed
     /// has no captain ledger (a fixture, a store without a host); a refusal throws, so the
     /// screen says what the host said.
     func economy(world: String, window: String) async throws -> CaptainEconomy?
@@ -246,14 +246,14 @@ public protocol CaptainActs: Sendable {
     /// filed only if the mind would still make it; the proposal's own actionId goes on the
     /// wire. Returns what the exchange said.
     func confirm(_ proposal: PilotProposal, world: String) async throws -> String
-    /// File a standing order the captain gave (T-252): on this hull, or on every hull the
+    /// File a standing order the captain gave: on this hull, or on every hull the
     /// captain flies. Returns what the host said. The pilots fly it ahead of their doctrine.
     func order(_ order: OrderRequest, world: String) async throws -> String
 }
 
 public extension CaptainActs {
     func order(_ order: OrderRequest, world: String) async throws -> String {
-        throw FeedError.needsHost("orders go to the pilots through a familiar host; add a host connection")
+        throw FeedError.needsHost("orders go to the pilots through a fleet host; add a host connection")
     }
     func pilotProposal(world: String) async throws -> PilotProposal? { nil }
     func confirm(_ proposal: PilotProposal, world: String) async throws -> String {
@@ -262,9 +262,9 @@ public extension CaptainActs {
 }
 
 /// A typed act the doctrine's decision maps to on the exchange's `/v1/actions` — THE
-/// ALLOWLIST (T-237 B4 re-verification, finding 3). A decision that is not here cannot be
-/// filed from a direct-mode device whatever the verdict says, and the bodies are the host
-/// runner's own (`crates/whisker/src/main.rs`, the `body` match), so a captain's tap files
+/// ALLOWLIST. A decision that is not here cannot be filed from a direct-mode device whatever
+/// the verdict says, and the bodies are the host runner's own
+/// (`crates/pilot/src/main.rs`, the `body` match), so a captain's tap files
 /// exactly what the pilot would have filed.
 public enum ExchangeAct: Equatable, Sendable {
     case refuel
@@ -429,7 +429,7 @@ public struct StoreFeed: ShipsFeed {
     }
 }
 
-/// The captain's acts on a store this machine holds. Pairing needs the `familiar` binary
+/// The captain's acts on a store this machine holds. Pairing needs the `ucf-familiar` binary
 /// (the key answers for itself on the exchange, the world is commissioned and leased), so
 /// on a bare store it is refused with the exact argv the host should run.
 public struct StoreCaptainActs: CaptainActs {
@@ -466,15 +466,15 @@ public struct StoreCaptainActs: CaptainActs {
     }
 
     public func pair(_ request: PairingRequest, key: PairingKey) async throws {
-        throw FeedError.needsHost("run `familiar " + request.fleetPairArguments(keyFile: "<key-file>").joined(separator: " ") + "`")
+        throw FeedError.needsHost("run `ucf-familiar " + request.fleetPairArguments(keyFile: "<key-file>").joined(separator: " ") + "`")
     }
 
     public func unpair(world: String) async throws {
-        throw FeedError.needsHost("run `familiar fleet unpair \(world)`")
+        throw FeedError.needsHost("run `ucf-familiar fleet unpair \(world)`")
     }
 
     public func rename(world: String, computer: String) async throws -> String? {
-        throw FeedError.needsHost("run `familiar fleet rename \(world) \"\(computer)\"`")
+        throw FeedError.needsHost("run `ucf-familiar fleet rename \(world) \"\(computer)\"`")
     }
 
     public func setAutomations(world: String, automations: [Automation]) async throws -> String? {

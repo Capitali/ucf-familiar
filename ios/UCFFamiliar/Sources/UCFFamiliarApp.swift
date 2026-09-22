@@ -2,10 +2,10 @@ import SwiftUI
 import FamiliarSC
 import FamiliarSCUI
 
-// UCF Familiar — the ship's computer as its own app, and nothing else (Ian, 2026-09-04): a
-// companion to United Cat Foods that runs against Jeff's PROD world or a dev instance, with
+// UCF Familiar — the ship's computer as its own app, and nothing else (settled 2026-09-04): a
+// companion to United Cat Foods that runs against the exchange's PROD world or a dev instance, with
 // Apple Intelligence on the device (and Private Cloud Compute) as its brains, so it can stay
-// entirely on the iPad, iPhone or Mac. A familiar host is optional: add one to get a pilot
+// entirely on the iPad, iPhone or Mac. A fleet host is optional: add one to get a pilot
 // that flies while the phone sleeps; without one, Felix observes, briefs, advises and talks
 // straight from the exchange.
 
@@ -18,8 +18,8 @@ struct UCFFamiliarApp: App {
             UCFFamiliarRoot(connections: connections)
                 .preferredColorScheme(.dark)
                 // The bridge is a flight deck, not a form: no clock, battery or Wi-Fi glyphs over
-                // it, and the home indicator fades until touched (Ian, TestFlight feedback on
-                // build 7, Capitali/familiar#6). Both are preferences the system may override.
+                // it, and the home indicator fades until touched (TestFlight feedback on
+                // build 7). Both are preferences the system may override.
                 .statusBarHidden()
                 .persistentSystemOverlays(.hidden)
         }
@@ -43,7 +43,7 @@ struct UCFFamiliarRoot: View {
         Group {
             if let active = connections.active, let model = model(for: active) {
                 // The picker is a toolbar item, not an overlay: build 7 floated it top-right and it
-                // sat on the stack's own "Pair a ship" button (Capitali/familiar#6).
+                // sat on the stack's own "Pair a ship" button.
                 SCRootView(model: model, scanner: PairingScanner.camera, onClose: nil, fixtureNote: nil) { header(active) }
             } else {
                 ConnectionsView(connections: connections)
@@ -81,7 +81,7 @@ struct UCFFamiliarRoot: View {
             m = BridgeModel(feed: wire, acts: wire, voiceConsent: consent)
         case .direct(_, let exchange, _):
             guard let key = connections.secret(for: c), var direct = DirectFeed(exchange: exchange, key: key) else { return nil }
-            // The pilot's mind, in the shell's hand: FamiliarCore's whisker_advise (T-237 B4).
+            // The pilot's mind, in the shell's hand: FamiliarCore's whisker_advise.
             direct.adviser = { whiskerAdvise(inputJson: $0) }
             m = BridgeModel(feed: direct, acts: direct, voiceConsent: consent)
         }

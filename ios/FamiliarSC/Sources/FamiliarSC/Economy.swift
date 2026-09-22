@@ -1,8 +1,8 @@
 import Foundation
 
-// T-241 — economic history and profit, by captain (Ian, 2026-09-09: "Familiar UCF views
-// should include economic history/trend lines and analysis of profit in summary form for
-// overview by captain"). The HOST computes it (`crates/cli/src/economy.rs`: every `credits`
+// Economic history and profit, by captain — asked for on 2026-09-09: the UCF views should
+// include economic history and trend lines, and analysis of profit in summary form for
+// overview by captain. The HOST computes it (`crates/cli/src/economy.rs`: every `credits`
 // reading in a hull's journal is a point, every delta is exact money booked to the last act
 // that could have moved it — or, where the exchange's own cash ledger answers, the fold's
 // word on each credit — pooled per captain across hulls, with a least-squares trend and the

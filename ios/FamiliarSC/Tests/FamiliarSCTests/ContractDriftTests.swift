@@ -2,8 +2,8 @@ import XCTest
 @testable import FamiliarSC
 @testable import FamiliarSCUI
 
-/// The cross-runtime contracts codex found drifting on T-237 B2 (re-verification 2026-09-08,
-/// findings 2–4), each pinned against ONE shared fixture the Rust suite pins too
+/// The cross-runtime contracts a review found drifting (2026-09-08), each pinned
+/// against ONE shared fixture the Rust suite pins too
 /// (`Fixtures/contract/*.json`): the dial's surfaces and defaults, the captain's durable
 /// identity, and the runner's journal vocabulary through the notice and voice policies.
 final class ContractDriftTests: XCTestCase {

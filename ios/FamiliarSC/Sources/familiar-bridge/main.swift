@@ -2,7 +2,7 @@ import Foundation
 import FamiliarSC
 import FamiliarSCUI
 
-// familiar-bridge — a macOS stand-in for the captain's bridge (T-237 B2's visible proof).
+// familiar-bridge — a macOS stand-in for the captain's bridge, and the visible proof.
 // Reads a ship store and speaks the report through the voice ladder; shows the message
 // window, the notices and the dial. Read-only: it never writes a store, never posts an act.
 
@@ -13,7 +13,7 @@ usage:
   familiar-bridge notices <ship-dir> [--since-ticks N]
   familiar-bridge dial    <ship-dir>
   familiar-bridge voices  [--consent-pcc]
-  familiar-bridge fleet   <feed-url> --token-file <file> [--json]     # `familiar fleet serve` over the wire
+  familiar-bridge fleet   <feed-url> --token-file <file> [--json]     # `ucf-familiar fleet serve` over the wire
 """
 
 func fail(_ msg: String) -> Never {

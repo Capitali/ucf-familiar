@@ -2,7 +2,7 @@ import XCTest
 @testable import FamiliarSC
 @testable import FamiliarSCUI
 
-/// T-252: the captain's word is an order. Ian's exact sentence reads as a travel and a hold
+/// The captain's word is an order. The sentence that settled it reads as a travel and a hold
 /// for every hull; the conversation answers with the order read back, never status; the
 /// routes are the host's; a question is still a question.
 final class OrdersTests: XCTestCase {
@@ -34,7 +34,7 @@ final class OrdersTests: XCTestCase {
         XCTAssertEqual(OrderParser.parse("regroup this ship at cannery row")?.map(\.scope), [.thisHull, .thisHull])
     }
 
-    /// T-254 (Ian, 2026-09-20): the four sentences that must at least reach the floor's reader.
+    /// From 2026-09-20: the four sentences that must at least reach the floor's reader.
     func testTheCaptainsOwnPhrasingsReachTheFloor() throws {
         XCTAssertEqual(OrderParser.parse("everyone get to tuna-prime")?.map { "\($0.verb.rawValue) \($0.station ?? "") \($0.scope.rawValue)" }, ["travel tuna-prime fleet"])
         XCTAssertEqual(OrderParser.parse("All ships head to tuna-prime")?.map { "\($0.verb.rawValue) \($0.station ?? "") \($0.scope.rawValue)" }, ["travel tuna-prime fleet"])
@@ -44,7 +44,7 @@ final class OrdersTests: XCTestCase {
         XCTAssertEqual(OrderParser.parse("Felix, stand down and fly as you see fit")?.first?.verb, .resume)
     }
 
-    /// T-254: what the model's tool records decides the turn — the read-back of the recorded
+    /// What the model's tool records decides the turn — the read-back of the recorded
     /// orders, on the model's lane, never a status answer.
     func testARecordedOrderIsReadBackNotGrounded() {
         let voice = BridgeVoice(persona: Persona(name: "Felix"))
@@ -72,7 +72,7 @@ final class OrdersTests: XCTestCase {
         XCTAssertEqual(OrderParser.parse("resume, all ships")?.map { "\($0.verb.rawValue) \($0.scope.rawValue)" }, ["resume fleet"])
         XCTAssertEqual(OrderParser.parse("cancel the hold and carry on")?.map(\.verb), [.resume])
         XCTAssertTrue(OrderParser.readback([OrderRequest(verb: .resume, scope: .fleet)]).contains("the standing course is lifted"))
-        // The tanker (Ian's second screenshot: "Allow the pilot to,call paws." got status).
+        // The tanker (from a screenshot: "Allow the pilot to,call paws." got status).
         XCTAssertEqual(OrderParser.parse("Allow the pilot to,call paws.")?.map(\.verb), [.callPaws])
         XCTAssertEqual(OrderParser.parse("Felix, call paws")?.first?.body["verb"], .string("paws"))
         XCTAssertEqual(OrderParser.parse("send for the tanker now")?.first?.when, "now")

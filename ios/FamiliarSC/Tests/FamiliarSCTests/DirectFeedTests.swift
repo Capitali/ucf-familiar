@@ -43,7 +43,7 @@ final class DirectFeedTests: XCTestCase {
         // the way out, so the drive dropped before leg two. Not a repair; nothing repaired her. A worn
         // drive means less Δv and so LESS fuel: wear accrued mid-route cannot strand a ship on propellant,
         // it makes her late. A plan priced at the departure drive is conservative on fuel, optimistic on
-        // time — safe for a pump run, dangerous for a pickup window (wildhorse, 2026-09-04).
+        // time — safe for a pump run, dangerous for a pickup window (seen in flight, 2026-09-04).
         XCTAssertEqual(BurnRungs.routeFuel(legsKm: day, hullAccelMilliG: 178, burnBps: BurnRungs.economyBps), 109)
         XCTAssertTrue(BurnRungs.modelAgrees(legsKm: day, quotedAtReference: 168))
         let full = BurnRungs.plan(legsKm: legs, quotedAtReference: 168, hullAccelMilliG: 189, tank: 600)
@@ -85,11 +85,11 @@ final class DirectFeedTests: XCTestCase {
     }
 }
 
-/// Live reproduction of Ian's 2026-09-07 iPad report ("sees ship, but states no pilot"):
+/// Live reproduction of the 2026-09-07 iPad report ("sees ship, but states no pilot"):
 /// run the direct-mode gather against a real exchange with a real key and a stub adviser
 /// that records the input it was handed. Skipped unless UCF_SERVER + UCF_KEY are set.
 final class DirectPilotDocumentTests: XCTestCase {
-    /// Ian's iPad, 2026-09-07: "states no pilot". A failed gather must be SAID in the
+    /// From an iPad, 2026-09-07: "states no pilot". A failed gather must be SAID in the
     /// document, a shell without the core must say so, and a reading is a reading.
     func testThePilotDocumentIsNeverAbsent() {
         let ok = DirectFeed.pilotDocument(.success("The pilot would now: hold — under way, no load."))

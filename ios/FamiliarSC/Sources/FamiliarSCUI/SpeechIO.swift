@@ -21,7 +21,7 @@ public final class Speaker: NSObject, AVSpeechSynthesizerDelegate, @unchecked Se
     /// The captain's chosen voice (UserDefaults `sc.voiceIdentifier`), else the best installed:
     /// premium, then enhanced, matching the device's language first. Premium voices are a
     /// download (iOS Settings → Accessibility → Spoken Content → Voices); the compact default is
-    /// the "terrible" one (Ian, 2026-09-04).
+    /// the "terrible" one (2026-09-04).
     public static let chosenVoiceKey = "sc.voiceIdentifier"
 
     public static func candidates() -> [AVSpeechSynthesisVoice] {

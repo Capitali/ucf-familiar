@@ -1,7 +1,7 @@
 import SwiftUI
 import FamiliarSC
 
-/// The ship's paperwork, editable from the bridge (Ian, 2026-09-04: "Should have the ability
+/// The ship's paperwork, editable from the bridge (asked for 2026-09-04: "Should have the ability
 /// to edit/update these within the UI"): the computer's name (one per captain — renaming
 /// here renames her for every ship), what the pilot may do, which captain the ship flies
 /// for, and unpairing. Every save is the captain's act through `CaptainActs`.

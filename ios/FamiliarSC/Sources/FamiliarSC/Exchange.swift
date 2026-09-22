@@ -7,7 +7,7 @@ import Foundation
 // whole market as empty that day.
 //
 // ONE method POSTs an action, `file(_:actionId:)`, and only the captain's confirmed act
-// reaches it (T-237 B4 finding 3, direct mode's confirm-to-act path): Apple Intelligence
+// reaches it (direct mode's confirm-to-act path): Apple Intelligence
 // never places an action on the exchange, and no read path can. Through a host the pilot
 // files acts and the captain approves them in the ship store. `ActionAck` is a CLOCK
 // (resolvesAtTick), never a verdict — outcomes come from /v1/receipts (trades) and
@@ -220,8 +220,8 @@ public struct RouteLeg: Codable, Equatable {
 
 /// The exchange's price for THIS hull at one service class — `/v1/route?…&hull=me&serviceClass=`
 /// (ucf-exchange `RouteHandler.HullQuote`, 5f28c45e). The world's own figure for a rung,
-/// wear and fittings applied, which the doctrine treats as authoritative over its model
-/// (T-237 B4 re-verification, finding 1). Absent from every plan that did not ask.
+/// wear and fittings applied, which the doctrine treats as authoritative over its own
+/// model. Absent from every plan that did not ask.
 public struct HullQuote: Codable, Equatable {
     public var actor: String?
     public var accelMilliG: Int64?
@@ -268,7 +268,7 @@ public struct Profile: Codable, Equatable {
     public var stats: ProfileStats?
 }
 
-/// The sky, as `/v1/reference.bodies` serves it — the integer sky the ΔV bridge (B4) draws.
+/// The sky, as `/v1/reference.bodies` serves it — the integer sky the ΔV bridge draws.
 public struct Body: Codable, Equatable {
     public var id: String
     public var name: String?
@@ -400,7 +400,7 @@ public struct ExchangeClient: Sendable {
         let resp: URLResponse
         do { (data, resp) = try await session.data(for: request(path)) } catch {
             // Named by endpoint like every other failure: a transport error on the captain's
-            // board must say WHICH read did not happen (codex T-237 B4 r3, finding 1).
+            // board must say WHICH read did not happen.
             throw ExchangeError.transport("\(path): \(error.localizedDescription)")
         }
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0

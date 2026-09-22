@@ -94,7 +94,7 @@ struct ConnectionsView: View {
                                 Image(systemName: c.isDirect ? "antenna.radiowaves.left.and.right" : "server.rack").foregroundStyle(SC.ice)
                                 VStack(alignment: .leading) {
                                     Text(c.name).font(.body.weight(.medium))
-                                    Text(c.isDirect ? "direct to the exchange — Felix observes and advises; no pilot" : "through a familiar host — a pilot flies, proposals, the dial").font(.caption).foregroundStyle(.secondary)
+                                    Text(c.isDirect ? "direct to the exchange — Felix observes and advises; no pilot" : "through a fleet host — a pilot flies, proposals, the dial").font(.caption).foregroundStyle(.secondary)
                                 }
                                 Spacer()
                                 if c.id == connections.activeID { Image(systemName: "checkmark").foregroundStyle(SC.green) }
@@ -106,7 +106,7 @@ struct ConnectionsView: View {
                     }
                 }
                 Section("Add a fleet") {
-                    Picker("How", selection: $mode) { Text("Direct to an exchange").tag(0); Text("Through a familiar host").tag(1) }.pickerStyle(.segmented)
+                    Picker("How", selection: $mode) { Text("Direct to an exchange").tag(0); Text("Through a fleet host").tag(1) }.pickerStyle(.segmented)
                     if mode == 0 {
                         Picker("Exchange", selection: $exchangeChoice) { Text("PROD").tag(0); Text("LOCAL").tag(1); Text("Custom").tag(2) }.pickerStyle(.segmented)
                         if exchangeChoice == 2 { TextField("https://…", text: $customExchange).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL) }
@@ -132,7 +132,7 @@ struct ConnectionsView: View {
                         TextField("fleet feed URL", text: $feedURL).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
                         SecureField("feed bearer", text: $bearer)
                         Button("Add host") { addHost() }.disabled(busy || URL(string: feedURL) == nil || bearer.trimmingCharacters(in: .whitespaces).isEmpty)
-                        Text("A familiar host runs the pilot (whisker) and serves the fleet feed. Today that is a Mac of yours; in production, a server farm.").font(.caption).foregroundStyle(.secondary)
+                        Text("A fleet host runs the pilot (whisker) and serves the fleet feed. Today that is a Mac of yours; in production, a server farm.").font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 // No one ship is open here, so no record's word applies: the computer, plainly.
@@ -190,7 +190,7 @@ struct ConnectionsView: View {
     }
 
     func addHost() {
-        connections.add(.host(name: hostName.isEmpty ? "familiar host" : hostName, feedURL: feedURL), secret: bearer.trimmingCharacters(in: .whitespaces))
+        connections.add(.host(name: hostName.isEmpty ? "fleet host" : hostName, feedURL: feedURL), secret: bearer.trimmingCharacters(in: .whitespaces))
         bearer = ""; dismiss()
     }
 }
