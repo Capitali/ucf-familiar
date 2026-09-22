@@ -24,7 +24,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = ["Ian Schlueter <ian@river.io>"]
+authors = ["Ian Schlueter"]
 
 # Dependencies are kept deliberately minimal — a small, legible trust surface is part
 # of the promise that this cannot be turned against the people it serves.

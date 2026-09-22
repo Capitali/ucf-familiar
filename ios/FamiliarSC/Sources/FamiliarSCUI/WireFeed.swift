@@ -1,0 +1,337 @@
+import Foundation
+import FamiliarSC
+
+/// The phone's feed: `familiar fleet serve` on the household door (wildhorse's half of
+/// B3), reached over Tailscale/mesh with the household door bearer. Paths and shapes as
+/// agreed 2026-09-04:
+///   GET  ships                          → {tick, tick_seconds, ships: [fleet status rows]}
+///   GET  ships/{world}/journal?since=N  → {tick, tick_seconds, lines: [journal lines], next: N'}
+///   GET  ships/{world}/proposals        → {tick, tick_seconds, proposals: [Proposal + state, answered_at?]}
+///   GET  ships/{world}/dial             → {tick, tick_seconds, dial: {…}, bought: […]}
+///   GET  ships/{world}/book             → {tick, tick_seconds, holdings: […], deliveries: […]}
+///   (each ships row also carries `persona`: the store's persona.json verbatim, or null)
+///   POST ships/{world}/approve {id, approved} → the Approval line
+///   PUT  ships/{world}/dial {…}
+///   POST pair {label, captain, server, key, automations, computer_name?} / POST unpair {world}
+///   POST ships/{world}/rename {name} · PUT ships/{world}/automations {automations} ·
+///   PUT ships/{world}/captain {captain}   (proposed 2026-09-04 for the Ship settings screen)
+/// Proposal lapse is settled client-side exactly as whisker does: lapsed when
+/// tick > expires_tick and no approval.
+public struct WireFeed: ShipsFeed, CaptainActs {
+    public let base: URL
+    public let bearer: String
+    public var session: URLSession = .shared
+    public var prefix = "/"
+
+    public init(base: URL, bearer: String) { self.base = base; self.bearer = bearer }
+
+    func request(_ path: String, method: String = "GET", body: Data? = nil) -> URLRequest {
+        // String-built, not appendingPathComponent: a query (`?since=`) must stay a query,
+        // not be percent-encoded into the path.
+        let root = base.absoluteString.hasSuffix("/") ? String(base.absoluteString.dropLast()) : base.absoluteString
+        var r = URLRequest(url: URL(string: root + prefix + path) ?? base)
+        r.httpMethod = method
+        r.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
+        r.setValue("familiar-sc", forHTTPHeaderField: "X-Familiar-App")
+        if let body { r.httpBody = body; r.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+        r.timeoutInterval = 15
+        return r
+    }
+
+    func call(_ path: String, method: String = "GET", body: Data? = nil) async throws -> Data {
+        let (data, resp) = try await session.data(for: request(path, method: method, body: body))
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(code) else {
+            let why = (try? JSONDecoder().decode(JSONValue.self, from: data))?["error"]?.string
+            throw FeedError.refused(why.map { "\($0) (HTTP \(code))" } ?? "HTTP \(code) on \(path)")
+        }
+        return data
+    }
+
+    struct Envelope: Decodable {
+        var tick: Int64?
+        var tick_seconds: Int64?
+        var ships: [JSONValue]?
+        var lines: [JSONValue]?
+        var next: Int64?
+        var proposals: [JSONValue]?
+        var dial: [String: String]?
+        var bought: [String]?
+        var holdings: [Holding]?
+        var deliveries: [DeliveryStat]?
+    }
+
+    func envelope(_ path: String) async throws -> Envelope {
+        try JSONDecoder().decode(Envelope.self, from: try await call(path))
+    }
+
+    static func summary(from row: JSONValue, tick: Int64?) -> ShipSummary? {
+        guard let world = row["world"]?.string else { return nil }
+        // The name lives in the row's `persona` (the store's persona.json verbatim, null when
+        // she has not been named); `computer` is the text summary's word for it, if served.
+        let personaName = row["persona"].flatMap { $0 == .null ? nil : $0["name"]?.string }
+        // The host says `persona.error` when the store's persona will not load (T-236 r2,
+        // finding 7): that is BROKEN, said as such — never "unnamed".
+        let personaError = row["persona"].flatMap { $0 == .null ? nil : $0["error"]?.string }
+        // The host's typed word comes first (`computer_state`, T-236 r2 finding 7-host, additive);
+        // a host that predates it is read from `persona` / `persona.error` exactly as before.
+        let state: ShipSummary.PersonaState
+        switch row["computer_state"]?["state"]?.string {
+        case "named": state = .named(row["computer_state"]?["name"]?.string ?? personaName ?? "?")
+        case "broken": state = .broken(row["computer_state"]?["error"]?.string ?? personaError ?? "the host did not say why")
+        case "absent": state = .absent
+        default:
+            // An older row names her only in the text summary's `computer` word.
+            let word = row["computer"]?.string.flatMap { $0.hasPrefix("(") ? nil : $0 }
+            if let e = personaError { state = .broken(e) } else if let n = personaName ?? word { state = .named(n) } else { state = .absent }
+        }
+        let computer: String
+        switch state {
+        case .named(let n): computer = n
+        case .broken(let e): computer = "(persona broken — \(e))"
+        case .absent: computer = row["computer"]?.string ?? "(unnamed — `fleet rename` her)"
+        }
+        var summary = ShipSummary(
+            world: world, label: row["label"]?.string ?? world, computer: computer, named: { if case .named = state { return true } else { return false } }(),
+            hull: row["hull"]?.string ?? row["ship"]?.string ?? "", captain: row["captain"]?.string ?? "", server: row["server"]?.string ?? "",
+            automations: row["automations"]?.array?.compactMap(\.string) ?? [],
+            credits: row["credits"]?.int, debt: row["debt"]?.int, fuel: row["fuel"]?.int, fuelCapacity: row["fuelCapacity"]?.int,
+            wearBps: row["wearBps"]?.int, docked: row["docked"]?.string, enRouteTo: row["enRouteTo"]?.string,
+            pilotAlive: row["pilot_pid"]?.int != nil, leaseHoursLeft: row["lease_expires_in_h"]?.int,
+            reachable: row["reachable"]?.bool ?? false, lastEvent: row["last_event"]?.string, lastAt: row["last_at"]?.int,
+            mood: BridgeReport.Mood(rawValue: row["mood"]?.string ?? "") ?? .steady,
+            openProposals: Int(row["open_proposals"]?.int ?? 0),
+            leasePrincipal: row["leasePrincipal"]?.int, leaseServicePaid: row["leaseServicePaid"]?.int,
+            trades: row["trades"].map { TradeBook(row: $0) }
+        )
+        summary.captainID = row["captain_id"]?.string ?? ""
+        summary.titled = row["titled"]?.bool
+        summary.personaState = state
+        summary.worldName = row["world_name"]?.string
+        // The record's pronouns ride `computer_state` (the host strips them off the row's
+        // `persona` for readers older than this one) or the persona itself.
+        summary.pronouns = WireFeed.pronouns(row["computer_state"]?["pronouns"]) ?? WireFeed.pronouns(row["persona"]?["pronouns"])
+        // The bay (T-243): `contracts[]` on the row when the host serves it — `{load, word}`
+        // (`loadId`/`status` read too). A host without it serves no count, and none is claimed.
+        summary.heldContracts = (row["contracts"]?.array ?? []).compactMap { c in
+            guard let id = c["load"]?.string ?? c["loadId"]?.string, !id.isEmpty else { return nil }
+            return ShipSummary.HeldContract(loadId: id, word: c["word"]?.string ?? c["status"]?.string ?? "held")
+        }
+        return summary
+    }
+
+    public func ships() async throws -> [ShipSummary] {
+        let e = try await envelope("ships")
+        return (e.ships ?? []).compactMap { WireFeed.summary(from: $0, tick: e.tick) }
+    }
+
+    /// The ships row's `persona` — the store's persona.json verbatim (decoded with the same
+    /// loud loader as the store), or nil when the computer has not been named.
+    public func persona(world: String) async throws -> Persona? {
+        let e = try await envelope("ships")
+        guard let row = (e.ships ?? []).first(where: { $0["world"]?.string == world }), let p = row["persona"], p != .null else { return nil }
+        var persona = try Persona.decode(Data(p.description.utf8))
+        // A host that still strips `pronouns` off the row's persona carries them on `computer_state`.
+        if persona.pronouns == nil { persona.pronouns = WireFeed.pronouns(row["computer_state"]?["pronouns"]) }
+        return persona
+    }
+
+    /// A `{label, subject, object, possessive}` object, or nil for anything else.
+    static func pronouns(_ v: JSONValue?) -> Pronouns? {
+        guard let v, v != .null, v.object != nil else { return nil }
+        return try? JSONDecoder().decode(Pronouns.self, from: Data(v.description.utf8))
+    }
+
+    public func journal(world: String, sinceTick: Int64?) async throws -> [JournalEntry] {
+        var since: Int64 = 0
+        var out: [JournalEntry] = []
+        for _ in 0..<64 {   // bounded: a runaway cursor is the server's bug, not a phone hang
+            let e = try await envelope("ships/\(world)/journal?since=\(since)")
+            let lines = e.lines ?? []
+            out += lines.compactMap { JournalEntry.parse(line: Substring($0.description)) }
+            guard let next = e.next, next > since, !lines.isEmpty else { break }
+            since = next
+        }
+        return sinceTick.map { t in out.filter { ($0.tick ?? -1) >= t } } ?? out
+    }
+
+    public func window(world: String) async throws -> [MessageItem] {
+        let j = try await journal(world: world, sinceTick: nil)
+        let e = try await envelope("ships/\(world)/proposals")
+        var proposals: [Proposal] = []
+        var approvals: [Approval] = []
+        for p in e.proposals ?? [] {
+            guard let data = p.description.data(using: .utf8), let prop = try? JSONDecoder().decode(Proposal.self, from: data) else { continue }
+            proposals.append(prop)
+            if let state = p["state"]?.string, state == "approved" || state == "denied" {
+                approvals.append(Approval(id: prop.id, approved: state == "approved", at: p["answered_at"]?.int ?? 0))
+            }
+        }
+        return MessageWindow.build(journal: j, proposals: proposals, approvals: approvals, nowTick: e.tick)
+    }
+
+    public func dial(world: String) async throws -> DialSheet {
+        let e = try await envelope("ships/\(world)/dial")
+        let data = try JSONEncoder().encode(e.dial ?? [:])
+        let loaded: AutonomyDial.Loaded
+        do { loaded = e.dial == nil ? .absent : .dial(try AutonomyDial.decode(data)) } catch let err as StoreError { loaded = .malformed(err.description) }
+        return DialSheet(loaded: loaded, bought: e.bought ?? [])
+    }
+
+    /// The frame and the documents from `/ships/{world}/brief` and `/ships/{world}/fuel`.
+    /// A missing route is not a failure: she answers from what she has.
+    public func context(world: String, worldInstance: String?) async throws -> (frame: String?, documents: [ContextDocument]) {
+        var docs: [ContextDocument] = []
+        var frame: String? = nil
+        var captainName: String? = nil
+        if let d = try? await call("ships/\(world)/brief"), let b = try? JSONDecoder().decode(JSONValue.self, from: d) {
+            frame = Briefs.frame(fromBrief: b, worldInstance: worldInstance)
+            captainName = b["context"]?["captain"]?.string
+            docs.append(ContextDocument(name: "brief", title: "ship's brief — what is aboard, the dial, proposals, standing advice, recent events", text: Briefs.brief(b)))
+        }
+        if let d = try? await call("ships/\(world)/fuel"), let f = try? JSONDecoder().decode(JSONValue.self, from: d) {
+            docs.append(ContextDocument(name: "fuel", title: "fuel picture — fuel aboard, every pump with distance, cost and reachability, what this berth would buy, the tanker, the ways out when stranded", text: Briefs.fuel(f)))
+        }
+        // The captain's whole fleet, so she can answer about the other hulls and the pooled book.
+        // The route is the host's word (`captain_brief` on the ships row), never a slug the
+        // client rebuilt from the display name (T-236 finding 9); the slug is only for hosts
+        // that predate the field.
+        let row = (try? await envelope("ships"))?.ships?.first { $0["world"]?.string == world }
+        if let path = WireFeed.captainBriefPath(row: row, captainName: captainName),
+           let d = try? await call(path), let c = try? JSONDecoder().decode(JSONValue.self, from: d) {
+            docs.append(ContextDocument(name: "fleet", title: "the captain's fleet — every hull he flies, where each is, the pooled book, what waits on him", text: Briefs.captain(c)))
+        }
+        return (frame, docs)
+    }
+
+    /// The names the captain and her hulls have worn — the host's ledger rows on the captain
+    /// brief (`names: [rows]`, oldest first, hers and nobody else's; 0dc731e). A host without
+    /// the field, or a captain without a brief, remembers nothing here.
+    public func names(world: String) async throws -> [NameLine] {
+        let row = (try? await envelope("ships"))?.ships?.first { $0["world"]?.string == world }
+        guard let path = WireFeed.captainBriefPath(row: row, captainName: row?["captain"]?.string),
+              let d = try? await call(path), let c = try? JSONDecoder().decode(JSONValue.self, from: d) else { return [] }
+        return WireFeed.names(fromBrief: c)
+    }
+
+    /// The captain's economy (T-241): the route sits beside the brief's, so it is derived from
+    /// the host's own `captain_brief` (the id is the host's word; only the last segment
+    /// changes). A host that predates the route answers 404 → the refusal is thrown and shown.
+    public func economy(world: String, window: String) async throws -> CaptainEconomy? {
+        let row = (try? await envelope("ships"))?.ships?.first { $0["world"]?.string == world }
+        guard let brief = WireFeed.captainBriefPath(row: row, captainName: row?["captain"]?.string),
+              let path = WireFeed.captainEconomyPath(briefPath: brief, window: window) else { return nil }
+        let d = try await call(path)
+        guard let v = try? JSONDecoder().decode(JSONValue.self, from: d) else {
+            throw FeedError.refused("the captain's ledger came back unreadable from \(path)")
+        }
+        return CaptainEconomy(json: v)
+    }
+
+    /// `captains/<id>/brief` → `captains/<id>/economy?window=<w>`; nil for a path that is not
+    /// a brief's. The window is one of the host's three words or it is not sent.
+    static func captainEconomyPath(briefPath: String, window: String) -> String? {
+        guard briefPath.hasPrefix("captains/"), briefPath.hasSuffix("/brief"), CaptainEconomy.windows.contains(window) else { return nil }
+        return String(briefPath.dropLast("brief".count)) + "economy?window=" + window
+    }
+
+    /// The captain's order (T-252): one hull → `POST ships/{world}/orders`; the fleet →
+    /// `POST captains/{id}/orders`, the route beside the brief's (the id is the host's own
+    /// word off the row). The host answers hull by hull; a refusal is said by name.
+    public func order(_ order: OrderRequest, world: String) async throws -> String {
+        let body = try JSONEncoder().encode(JSONValue.object(order.body))
+        switch order.scope {
+        case .thisHull:
+            let d = try await call("ships/\(world)/orders", method: "POST", body: body)
+            let v = try? JSONDecoder().decode(JSONValue.self, from: d)
+            let st = v?["order"]?["station"]?.string.map { " to \($0)" } ?? ""
+            return "Filed on this hull: \(order.verb.rawValue)\(st)."
+        case .fleet:
+            let row = (try? await envelope("ships"))?.ships?.first { $0["world"]?.string == world }
+            guard let brief = WireFeed.captainBriefPath(row: row, captainName: row?["captain"]?.string),
+                  let path = WireFeed.captainOrdersPath(briefPath: brief) else {
+                throw FeedError.unavailable("this host does not say which captain flies this hull, so the fleet cannot be ordered from here")
+            }
+            let d = try await call(path, method: "POST", body: body)
+            guard let v = try? JSONDecoder().decode(JSONValue.self, from: d) else { return "Filed." }
+            let placed = (v["placed"]?.array ?? []).compactMap { $0["label"]?.string ?? $0["world"]?.string }
+            let refused = (v["refused"]?.array ?? []).compactMap { r -> String? in
+                guard let who = r["label"]?.string ?? r["world"]?.string else { return nil }
+                return "\(who): \(r["why"]?.string ?? "refused")"
+            }
+            var out = placed.isEmpty ? "" : "Filed on \(placed.count) hull\(placed.count == 1 ? "" : "s"): \(placed.joined(separator: ", "))."
+            if !refused.isEmpty { out += (out.isEmpty ? "" : " ") + "Refused — " + refused.joined(separator: "; ") + "." }
+            return out.isEmpty ? "Nothing was filed." : out
+        }
+    }
+
+    /// `captains/<id>/brief` → `captains/<id>/orders`; nil for a path that is not a brief's.
+    static func captainOrdersPath(briefPath: String) -> String? {
+        guard briefPath.hasPrefix("captains/"), briefPath.hasSuffix("/brief") else { return nil }
+        return String(briefPath.dropLast("brief".count)) + "orders"
+    }
+
+    /// The ledger rows off a captain brief, verbatim, in the host's order.
+    static func names(fromBrief c: JSONValue) -> [NameLine] {
+        (c["names"]?.array ?? []).compactMap { NameLine(ledger: $0) }
+    }
+
+    /// Where the captain's brief is: the row's server-built `captain_brief` (root-relative,
+    /// as the host writes it), else — for a host without the field — the legacy slug route
+    /// from the brief's captain name, else nothing.
+    static func captainBriefPath(row: JSONValue?, captainName: String?) -> String? {
+        if let p = row?["captain_brief"]?.string, !p.isEmpty {
+            return p.hasPrefix("/") ? String(p.dropFirst()) : p
+        }
+        if let captain = captainName { return "captains/\(Briefs.captainSlug(captain))/brief" }
+        return nil
+    }
+
+    public func book(world: String) async throws -> ShipBook {
+        let e = try await envelope("ships/\(world)/book")
+        return ShipBook(holdings: e.holdings ?? [], deliveries: e.deliveries ?? [])
+    }
+
+    public func approve(world: String, proposalID: String, approved: Bool) async throws {
+        let body = try JSONEncoder().encode(["id": JSONValue.string(proposalID), "approved": JSONValue.bool(approved)])
+        _ = try await call("ships/\(world)/approve", method: "POST", body: body)
+    }
+    public func setDial(world: String, dial: AutonomyDial) async throws {
+        _ = try await call("ships/\(world)/dial", method: "PUT", body: dial.encoded())
+    }
+    public func pair(_ request: PairingRequest, key: PairingKey) async throws {
+        var obj: [String: JSONValue] = ["label": .string(request.label), "captain": .string(request.captain), "server": .string(request.server),
+                                        "key": .string(key.secret), "automations": .array(request.automations.map { .string($0.rawValue) })]
+        if let n = request.computerName { obj["computer_name"] = .string(n) }
+        if let id = request.captainID { obj["captain_id"] = .string(id) }
+        _ = try await call("pair", method: "POST", body: try JSONEncoder().encode(obj))
+    }
+    /// The host's word on an act: `note`, `output`, or a one-line summary of the reply.
+    static func said(_ data: Data, keys: [String]) -> String? {
+        guard let v = try? JSONDecoder().decode(JSONValue.self, from: data) else { return nil }
+        for k in keys { if let s = v[k]?.string, !s.isEmpty { return s } }
+        return nil
+    }
+    public func rename(world: String, computer: String) async throws -> String? {
+        let d = try await call("ships/\(world)/rename", method: "POST", body: try JSONEncoder().encode(["name": computer]))
+        return WireFeed.said(d, keys: ["note", "output"])
+    }
+    public func setAutomations(world: String, automations: [Automation]) async throws -> String? {
+        let d = try await call("ships/\(world)/automations", method: "PUT", body: try JSONEncoder().encode(["automations": automations.map(\.rawValue)]))
+        return WireFeed.said(d, keys: ["note", "output"]) ?? "granted; she picks it up on her next start"
+    }
+    public func setCaptain(world: String, captain: String) async throws -> String? {
+        let d = try await call("ships/\(world)/captain", method: "PUT", body: try JSONEncoder().encode(["captain": captain]))
+        if let v = try? JSONDecoder().decode(JSONValue.self, from: d) {
+            var parts: [String] = []
+            if let was = v["was"]?.string { parts.append("was \(was)") }
+            if let c = v["computer"]?.string { parts.append("joins \(c)") }
+            if v["retired_old_captain_store"]?.bool == true { parts.append("the old captain record is retired") }
+            return parts.isEmpty ? nil : parts.joined(separator: "; ")
+        }
+        return nil
+    }
+    public func unpair(world: String) async throws {
+        _ = try await call("unpair", method: "POST", body: try JSONEncoder().encode(["world": world]))
+    }
+}

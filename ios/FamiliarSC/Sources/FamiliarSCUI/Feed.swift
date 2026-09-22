@@ -1,0 +1,500 @@
+import Foundation
+import FamiliarSC
+
+// The captain's bridge reads one feed and performs a few acts. The feed is a protocol so the
+// same screens run over ship stores on the host (the Mac, a fixture in previews) and over
+// `familiar fleet serve` on the phone (the wire, wildhorse's half of B3). Every act here is
+// the CAPTAIN's — approve/deny a proposal, set the dial, pair or unpair — done on a tap;
+// nothing in these screens lets a model perform one.
+
+/// One paired ship as the Ships screen shows it — the `fleet status` row, plus what the
+/// journal's tail says about her computer's mood.
+public struct ShipSummary: Identifiable, Equatable, Sendable {
+    public var world: String
+    public var label: String
+    public var computer: String
+    public var named: Bool
+    /// The computer's persona as the host or store holds it: named, never named, or BROKEN
+    /// with the loader's reason. Broken is not absent — a row that reads "unnamed" for a
+    /// persona the kernel refuses hides the breakage in the fleet list until the ship is
+    /// opened (codex T-236 re-verification r2, finding 7). Rendered distinctly everywhere.
+    public enum PersonaState: Equatable, Sendable { case named(String), absent, broken(String) }
+    public var personaState: PersonaState = .absent
+    public var hull: String
+    public var captain: String
+    /// The captain's durable identity (`captain_id` on the store record and the served row);
+    /// empty for a legacy record the host has not migrated. Every captain-scoped join keys
+    /// on `captainIdentity`, never on the display name.
+    public var captainID: String = ""
+    public var server: String
+    public var automations: [String]
+    public var credits: Int64?
+    public var debt: Int64?
+    public var fuel: Int64?
+    public var fuelCapacity: Int64?
+    public var wearBps: Int64?
+    public var docked: String?
+    public var enRouteTo: String?
+    public var pilotAlive: Bool
+    public var leaseHoursLeft: Int64?
+    public var reachable: Bool
+    public var lastEvent: String?
+    public var lastAt: Int64?
+    public var mood: BridgeReport.Mood
+    public var openProposals: Int
+    /// What two ships must share to be one captain's: the id when the record has one, else the
+    /// label marked as such — so a legacy record still groups, and two captains who happen to
+    /// share a display name never do once either has an id.
+    public var captainIdentity: String { captainID.isEmpty ? "label:" + captain : "id:" + captainID }
+    /// One sentence in her voice — the latest fold's headline.
+    public var sentence: String = ""
+    public var leasePrincipal: Int64?
+    public var leaseServicePaid: Int64?
+    /// The world's word on the hull's title (`titled` on `/v1/me`): true once the lease
+    /// balance cleared. nil when the row did not say (an older host, an unreachable hull).
+    public var titled: Bool? = nil
+    /// The hull as the exchange holds it: owned outright, leased with a balance, or unknown.
+    public var titleWord: String? {
+        switch titled {
+        case .some(true): return "owned"
+        case .some(false): return "lease" + ((debt ?? 0) > 0 ? " ℳ\(debt!)" : "")
+        case .none: return nil
+        }
+    }
+    /// The merchant's book as `fleet status` computes it from receipts ∪ journal (wire only).
+    public var trades: TradeBook?
+    /// A contract the hull holds and the ledger's word for it (T-243, the bay): the host's row
+    /// `contracts[]` when it serves one; in direct mode the ledger's own open loads.
+    public struct HeldContract: Equatable, Sendable {
+        public var loadId: String
+        public var word: String
+        public init(loadId: String, word: String) { self.loadId = loadId; self.word = word }
+    }
+    public var heldContracts: [HeldContract] = []
+    /// How the computer is spoken of — `computer_state.pronouns` on the row, or the persona's own;
+    /// nil until a captain has named it.
+    public var pronouns: Pronouns? = nil
+    /// The words a shell uses for this ship's computer: the record's, the name's, or `it`.
+    public var spokenOf: SpokenOf { SpokenOf.of(name: named ? computer : nil, pronouns: pronouns) }
+    /// The WORLD INSTANCE the ship flies in (PROD, LOCAL, TEST…) — the exchange's name for
+    /// itself, never part of the ship's name (Ian, 2026-09-04: "those are instance names of
+    /// the world not ship names"). Served as `world_name` when the host has it; else derived.
+    public var worldName: String?
+
+    /// The world instance to show: served, or LOCAL for a loopback exchange, or the host.
+    public var worldInstance: String {
+        if let w = worldName, !w.isEmpty { return w }
+        if server.contains("127.0.0.1") || server.contains("localhost") { return "LOCAL" }
+        return URL(string: server)?.host ?? server
+    }
+    /// The ship's own name — the hull's, never the world's.
+    public var shipName: String { hull.isEmpty ? label : hull }
+
+    public var id: String { world }
+
+    public init(world: String, label: String, computer: String, named: Bool, hull: String, captain: String, server: String, automations: [String], credits: Int64? = nil, debt: Int64? = nil, fuel: Int64? = nil, fuelCapacity: Int64? = nil, wearBps: Int64? = nil, docked: String? = nil, enRouteTo: String? = nil, pilotAlive: Bool, leaseHoursLeft: Int64? = nil, reachable: Bool, lastEvent: String? = nil, lastAt: Int64? = nil, mood: BridgeReport.Mood, openProposals: Int, sentence: String = "", leasePrincipal: Int64? = nil, leaseServicePaid: Int64? = nil, trades: TradeBook? = nil) {
+        self.world = world; self.label = label; self.computer = computer; self.named = named; self.hull = hull
+        self.captain = captain; self.server = server; self.automations = automations; self.credits = credits
+        self.debt = debt; self.fuel = fuel; self.fuelCapacity = fuelCapacity; self.wearBps = wearBps
+        self.docked = docked; self.enRouteTo = enRouteTo; self.pilotAlive = pilotAlive
+        self.leaseHoursLeft = leaseHoursLeft; self.reachable = reachable; self.lastEvent = lastEvent
+        self.lastAt = lastAt; self.mood = mood; self.openProposals = openProposals
+        self.sentence = sentence; self.leasePrincipal = leasePrincipal; self.leaseServicePaid = leaseServicePaid; self.trades = trades
+    }
+
+    /// The canvas's one-word mood tag.
+    public var moodWord: String {
+        if openProposals > 0 { return "asking" }
+        switch mood {
+        case .steady: return "content"
+        case .pleased: return "pleased"
+        case .watchful: return "watchful"
+        case .concerned: return "worried"
+        }
+    }
+
+    public var hullGlance: HullGlance {
+        HullGlance(shipName: hull.isEmpty ? nil : hull, docked: docked, enRouteTo: enRouteTo, credits: credits ?? 0,
+                   debt: debt, fuel: fuel, fuelCapacity: fuelCapacity, wearBps: wearBps, leased: false)
+    }
+}
+
+/// The merchant's book (`fleet status --json` → `trades`, wildhorse 1d4d098): realized P&L by
+/// FIFO cost, with its two honesty marks — units sold with no lot behind them are SET ASIDE,
+/// never counted in `realized`; lots whose basis is the pilot's own quoted ask (not a fill
+/// receipt) make the profit they imply a CEILING.
+public struct TradeBook: Equatable, Sendable {
+    public var filled: Int64 = 0
+    public var rejected: Int64 = 0
+    public var realized: Int64 = 0
+    public var costOfSold: Int64 = 0
+    public var marginPct: Int64 = 0
+    public var inventoryCost: Int64 = 0
+    public var unmatchedUnits: Int64 = 0
+    public var unmatchedProceeds: Int64 = 0
+    public var quotedBasisLots: Int64 = 0
+    /// The merchant's own judgment, measured (wildhorse 110e217): for every position opened
+    /// and later closed, what the buy rule promised against what the folds paid.
+    public var closedPositions: Int64 = 0
+    public var expectedMargin: Int64 = 0
+    public var realizedOnClosed: Int64 = 0
+
+    public init() {}
+
+    public init(row: JSONValue) {
+        filled = row["filled"]?.int ?? 0; rejected = row["rejected"]?.int ?? 0
+        realized = row["realized"]?.int ?? 0; costOfSold = row["cost_of_sold"]?.int ?? 0
+        marginPct = row["margin_pct"]?.int ?? 0; inventoryCost = row["inventory_cost"]?.int ?? 0
+        unmatchedUnits = row["unmatched_units"]?.int ?? 0; unmatchedProceeds = row["unmatched_proceeds"]?.int ?? 0
+        quotedBasisLots = row["quoted_basis_lots"]?.int ?? 0
+        closedPositions = row["closed_positions"]?.int ?? 0
+        expectedMargin = row["expected_margin"]?.int ?? 0
+        realizedOnClosed = row["realized_on_closed"]?.int ?? 0
+    }
+
+    /// "estimates: 2 closed, promised ℳ3,937, returned ℳ5,318" — nil until a position has closed.
+    public var estimatesLine: String? {
+        guard closedPositions > 0 else { return nil }
+        return "estimates: \(closedPositions) closed, promised ℳ\(expectedMargin), returned ℳ\(realizedOnClosed)"
+    }
+
+    /// The caveat the card shows when the number is not the whole truth; nil when it is.
+    public var caveat: String? {
+        var parts: [String] = []
+        if unmatchedUnits > 0 { parts.append("ℳ\(unmatchedProceeds) from \(unmatchedUnits) unmatched unit\(unmatchedUnits == 1 ? "" : "s") set aside") }
+        if quotedBasisLots > 0 { parts.append("\(quotedBasisLots) lot\(quotedBasisLots == 1 ? "" : "s") at a quoted basis, so the profit is a ceiling") }
+        return parts.isEmpty ? nil : parts.joined(separator: "; ")
+    }
+}
+
+/// The dial as a screen edits it: the file's settings plus which automations are bought.
+public struct DialSheet: Equatable, Sendable {
+    public var loaded: AutonomyDial.Loaded
+    public var bought: [String]
+    public init(loaded: AutonomyDial.Loaded, bought: [String]) { self.loaded = loaded; self.bought = bought }
+}
+
+/// The merchant's book and the delivery record, glanced.
+public struct ShipBook: Equatable, Sendable {
+    public var holdings: [Holding]
+    public var deliveries: [DeliveryStat]
+    public init(holdings: [Holding], deliveries: [DeliveryStat]) { self.holdings = holdings; self.deliveries = deliveries }
+
+    public var hauls: Int { deliveries.count }
+    public var freightPaid: Int64 { deliveries.reduce(0) { $0 + $1.paid } }
+    public var freightBooked: Int64 { deliveries.reduce(0) { $0 + $1.booked } }
+    public var inventoryAtCost: Int64 { holdings.reduce(0) { $0 + $1.units * $1.avgCost } }
+}
+
+public enum FeedError: Error, Equatable, CustomStringConvertible {
+    case unavailable(String)
+    case needsHost(String)
+    case refused(String)
+    public var description: String {
+        switch self {
+        case .unavailable(let s): return s
+        case .needsHost(let s): return "needs the ship's host: \(s)"
+        case .refused(let s): return s
+        }
+    }
+}
+
+public protocol ShipsFeed: Sendable {
+    func ships() async throws -> [ShipSummary]
+    /// What the computer may read about this ship right now (fuel, the brief…) and the one-
+    /// line frame of what the captain is looking at. Empty when the feed has no briefs.
+    func context(world: String, worldInstance: String?) async throws -> (frame: String?, documents: [ContextDocument])
+    func persona(world: String) async throws -> Persona?
+    /// The journal from a tick on (nil = all of it), oldest first.
+    func journal(world: String, sinceTick: Int64?) async throws -> [JournalEntry]
+    func window(world: String) async throws -> [MessageItem]
+    func dial(world: String) async throws -> DialSheet
+    func book(world: String) async throws -> ShipBook
+    /// The names this ship and her people have worn — the store's naming trail, or the host's
+    /// fleet-wide ledger when it serves it. Empty where nothing is remembered (Ian, 2026-09-08:
+    /// "We do not forget names").
+    func names(world: String) async throws -> [NameLine]
+    /// The captain's money over a window (`24h` | `7d` | `30d`): every hull he flies and the
+    /// pool, with points, from the host's `/captains/{id}/economy` (T-241). Nil where the feed
+    /// has no captain ledger (a fixture, a store without a host); a refusal throws, so the
+    /// screen says what the host said.
+    func economy(world: String, window: String) async throws -> CaptainEconomy?
+}
+
+public extension ShipsFeed {
+    func names(world: String) async throws -> [NameLine] { [] }
+    func economy(world: String, window: String) async throws -> CaptainEconomy? { nil }
+}
+
+public protocol CaptainActs: Sendable {
+    func approve(world: String, proposalID: String, approved: Bool) async throws
+    func setDial(world: String, dial: AutonomyDial) async throws
+    func pair(_ request: PairingRequest, key: PairingKey) async throws
+    func unpair(world: String) async throws
+    /// Name the captain's computer (the one that flies all his ships) — `fleet rename`.
+    /// Returns what the host said about it (nil when it said nothing).
+    func rename(world: String, computer: String) async throws -> String?
+    /// Change what the pilot may do for this ship (automations.json). A grant takes effect at
+    /// the pilot's NEXT START — the returned note says so; the sheet must not imply it is live.
+    func setAutomations(world: String, automations: [Automation]) async throws -> String?
+    /// Re-home the ship under another captain record (captain.json's `captain`).
+    func setCaptain(world: String, captain: String) async throws -> String?
+    /// Direct mode: what the pilot's mind would file now, held out for the captain to confirm.
+    /// Nil wherever a pilot files for itself (a host) or the shell carries no mind.
+    func pilotProposal(world: String) async throws -> PilotProposal?
+    /// File a proposal the captain confirmed. The world is read again first and the act is
+    /// filed only if the mind would still make it; the proposal's own actionId goes on the
+    /// wire. Returns what the exchange said.
+    func confirm(_ proposal: PilotProposal, world: String) async throws -> String
+    /// File a standing order the captain gave (T-252): on this hull, or on every hull the
+    /// captain flies. Returns what the host said. The pilots fly it ahead of their doctrine.
+    func order(_ order: OrderRequest, world: String) async throws -> String
+}
+
+public extension CaptainActs {
+    func order(_ order: OrderRequest, world: String) async throws -> String {
+        throw FeedError.needsHost("orders go to the pilots through a familiar host; add a host connection")
+    }
+    func pilotProposal(world: String) async throws -> PilotProposal? { nil }
+    func confirm(_ proposal: PilotProposal, world: String) async throws -> String {
+        throw FeedError.unavailable("this feed does not file acts; through a host the pilot files its own and the captain approves them")
+    }
+}
+
+/// A typed act the doctrine's decision maps to on the exchange's `/v1/actions` — THE
+/// ALLOWLIST (T-237 B4 re-verification, finding 3). A decision that is not here cannot be
+/// filed from a direct-mode device whatever the verdict says, and the bodies are the host
+/// runner's own (`crates/whisker/src/main.rs`, the `body` match), so a captain's tap files
+/// exactly what the pilot would have filed.
+public enum ExchangeAct: Equatable, Sendable {
+    case refuel
+    case repair
+    case callPaws
+    case travel(station: String, serviceClass: String?)
+    case book(loadId: String)
+    case collect(loadId: String)
+
+    /// The wire body without its actionId — the caller owns that.
+    public var body: [String: JSONValue] {
+        switch self {
+        case .refuel: return ["type": .string("refuel")]
+        case .repair: return ["type": .string("repair")]
+        case .callPaws: return ["type": .string("paws")]
+        case .travel(let station, let serviceClass):
+            var b: [String: JSONValue] = ["type": .string("travel"), "station": .string(station)]
+            if let serviceClass { b["serviceClass"] = .string(serviceClass) }
+            return b
+        case .book(let loadId): return ["type": .string("book"), "loadId": .string(loadId)]
+        case .collect(let loadId): return ["type": .string("collect"), "loadId": .string(loadId)]
+        }
+    }
+
+    public var sentence: String {
+        switch self {
+        case .refuel: return "refuel at this berth's pump"
+        case .repair: return "repair the drive at this berth"
+        case .callPaws: return "call the PAWS tanker"
+        case .travel(let station, let serviceClass): return "file a course to \(station)" + (serviceClass.map { " on the \($0) burn" } ?? "")
+        case .book(let loadId): return "book load \(loadId)"
+        case .collect(let loadId): return "collect the money on \(loadId)"
+        }
+    }
+
+    /// The seam's `decision` → the act, or nil for what is not an act: a hold, a course to
+    /// the berth she is already at (the host files nothing for that either), anything unknown.
+    /// Standard burn rides the wire ABSENT, exactly as the host sends it: `burn` is null then.
+    public static func from(decision d: JSONValue, docked: String?) -> ExchangeAct? {
+        switch d["type"]?.string {
+        case "refuel": return .refuel
+        case "repair": return .repair
+        case "call-paws": return .callPaws
+        case "divert-to-pump":
+            guard let pump = d["pump"]?.string else { return nil }
+            return .travel(station: pump, serviceClass: d["burn"]?.string)
+        case "travel":
+            guard let station = d["station"]?.string, station != docked else { return nil }
+            return .travel(station: station, serviceClass: nil)
+        case "book": return d["load_id"]?.string.map { .book(loadId: $0) }
+        case "collect": return d["load_id"]?.string.map { .collect(loadId: $0) }
+        default: return nil
+        }
+    }
+}
+
+/// What the pilot's mind would file now, held out for the captain: the act, why, and ONE
+/// actionId minted when it was shown and kept until it is filed or dropped — retry the id,
+/// never the intent (the owner's rule, ucf-exchange#14).
+public struct PilotProposal: Equatable, Sendable, Identifiable {
+    public var id: String { actionId }
+    public let actionId: String
+    public let act: ExchangeAct
+    /// The doctrine's reasons, said in words (`Briefs.reasons`).
+    public let reasons: String
+    public let surface: String?
+    public let tick: Int64?
+    public init(actionId: String, act: ExchangeAct, reasons: String, surface: String?, tick: Int64?) {
+        self.actionId = actionId; self.act = act; self.reasons = reasons; self.surface = surface; self.tick = tick
+    }
+}
+
+public extension ShipsFeed {
+    func context(world: String, worldInstance: String?) async throws -> (frame: String?, documents: [ContextDocument]) { (nil, []) }
+}
+
+// MARK: - The store feed: ship stores on this machine (the Mac host, or a copied fixture)
+
+/// Reads `<worlds>/*/` — every directory with a captain.json is a paired ship. The hull
+/// glance comes from the journal's last `holding`/`acted` line (credits, fuel, berth), since
+/// the store holds no wire; the Mac host's console can pass a wire glance in later.
+public struct StoreFeed: ShipsFeed {
+    public let worlds: URL
+    /// Ticks of journal the mood is judged over (one PROD day = 288).
+    public var moodWindowTicks: Int64 = 288
+
+    public init(worlds: URL) { self.worlds = worlds }
+
+    func stores() -> [ShipStore] {
+        let dirs = (try? FileManager.default.contentsOfDirectory(at: worlds, includingPropertiesForKeys: nil)) ?? []
+        return dirs.filter { FileManager.default.fileExists(atPath: $0.appendingPathComponent("captain.json").path) }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            .map { ShipStore(directory: $0) }
+    }
+
+    func store(_ world: String) throws -> ShipStore {
+        guard let s = stores().first(where: { $0.worldID == world }) else { throw FeedError.unavailable("no paired ship \(world)") }
+        return s
+    }
+
+    public static func summary(of s: ShipStore, moodWindowTicks: Int64 = 288) -> ShipSummary {
+        let captain: Captain? = try? s.captain()
+        let journal: Journal = (try? s.journal()) ?? Journal(entries: [], malformed: 0)
+        let entries = journal.entries
+        let last: JournalEntry? = entries.last
+        // Credits and fuel ride on many lines (acted, holding, traded, outfitted…): the
+        // last line that carries them is the freshest truth the store has.
+        let lastMoney: JournalEntry? = entries.last(where: { $0.int("credits") != nil })
+        let lastFuel: JournalEntry? = entries.last(where: { $0.int("fuel") != nil })
+        let lastHull: JournalEntry? = entries.last(where: { $0.event == "holding" || $0.event == "acted" })
+        let nowTick: Int64 = journal.lastTick ?? 0
+        let fromTick: Int64 = nowTick > moodWindowTicks ? nowTick - moodWindowTicks : 0
+        let window: [JournalEntry] = journal.since(tick: fromTick)
+        let items: [MessageItem] = MessageWindow.build(journal: entries, proposals: s.proposals(), approvals: s.approvals(), nowTick: nowTick)
+        let open: Int = items.filter { $0.needsTheCaptain }.count
+        let personaState: ShipSummary.PersonaState
+        let persona: Persona?
+        do { persona = try s.persona(); personaState = persona.map { .named($0.name) } ?? .absent }
+        catch { persona = nil; personaState = .broken("\(error)") }
+        let voice = TemplatedVoice(persona: persona ?? Persona(name: "?", style: nil))
+        let report: BridgeReport = voice.report(entries: window, openProposals: open)
+        let underWay: Bool = lastHull?.string("why") == "under way"
+        let lastLeg: JournalEntry? = entries.last(where: { $0.event == "engaged-drive" || $0.event == "unwedged-course" })
+        var out = ShipSummary(
+            world: s.worldID, label: s.worldID, computer: s.computerName(), named: persona != nil,
+            hull: captain?.hullName ?? "", captain: captain?.captain ?? "", server: captain?.server ?? "",
+            automations: (try? s.automations()) ?? captain?.automations ?? [],
+            pilotAlive: s.pilotPID() != nil, reachable: false,
+            mood: report.mood, openProposals: open
+        )
+        out.captainID = captain?.captainID ?? ""
+        out.personaState = personaState
+        out.credits = lastMoney?.int("credits")
+        out.fuel = lastFuel?.int("fuel")
+        out.docked = lastHull?.string("docked")
+        out.enRouteTo = underWay ? lastLeg?.string("to") : nil
+        out.lastEvent = last?.event
+        out.lastAt = last?.at
+        out.sentence = report.headline
+        return out
+    }
+
+    public func ships() async throws -> [ShipSummary] { stores().map { StoreFeed.summary(of: $0, moodWindowTicks: moodWindowTicks) } }
+    public func persona(world: String) async throws -> Persona? { try store(world).persona() }
+    public func names(world: String) async throws -> [NameLine] { try store(world).namings().map(NameLine.init(naming:)) }
+    public func journal(world: String, sinceTick: Int64?) async throws -> [JournalEntry] {
+        let j = try store(world).journal()
+        return sinceTick.map { j.since(tick: $0) } ?? j.entries
+    }
+    public func window(world: String) async throws -> [MessageItem] {
+        let s = try store(world)
+        let j = try s.journal()
+        return MessageWindow.build(journal: j.entries, proposals: s.proposals(), approvals: s.approvals(), nowTick: j.lastTick)
+    }
+    public func dial(world: String) async throws -> DialSheet {
+        let s = try store(world)
+        return DialSheet(loaded: s.dial(), bought: (try? s.automations()) ?? [])
+    }
+    public func book(world: String) async throws -> ShipBook {
+        let s = try store(world)
+        return ShipBook(holdings: s.holdings(), deliveries: s.deliveries())
+    }
+}
+
+/// The captain's acts on a store this machine holds. Pairing needs the `familiar` binary
+/// (the key answers for itself on the exchange, the world is commissioned and leased), so
+/// on a bare store it is refused with the exact argv the host should run.
+public struct StoreCaptainActs: CaptainActs {
+    public let worlds: URL
+    public init(worlds: URL) { self.worlds = worlds }
+
+    func dir(_ world: String) throws -> URL {
+        let d = worlds.appendingPathComponent(world)
+        guard FileManager.default.fileExists(atPath: d.appendingPathComponent("captain.json").path) else {
+            throw FeedError.unavailable("no paired ship \(world)")
+        }
+        return d
+    }
+
+    public func approve(world: String, proposalID: String, approved: Bool) async throws {
+        let d = try dir(world)
+        let line = MessageWindow.approvalLine(id: proposalID, approved: approved, at: Int64(Date().timeIntervalSince1970)) + "\n"
+        let url = d.appendingPathComponent("approvals.jsonl")
+        if let h = try? FileHandle(forWritingTo: url) {
+            defer { try? h.close() }
+            try h.seekToEnd()
+            try h.write(contentsOf: Data(line.utf8))
+        } else {
+            try Data(line.utf8).write(to: url)
+        }
+    }
+
+    public func setDial(world: String, dial: AutonomyDial) async throws {
+        let d = try dir(world)
+        // Atomic: tmp + rename, the same discipline as the persona writer.
+        let tmp = d.appendingPathComponent(".autonomy.json.tmp")
+        try dial.encoded().write(to: tmp)
+        _ = try FileManager.default.replaceItemAt(d.appendingPathComponent("autonomy.json"), withItemAt: tmp)
+    }
+
+    public func pair(_ request: PairingRequest, key: PairingKey) async throws {
+        throw FeedError.needsHost("run `familiar " + request.fleetPairArguments(keyFile: "<key-file>").joined(separator: " ") + "`")
+    }
+
+    public func unpair(world: String) async throws {
+        throw FeedError.needsHost("run `familiar fleet unpair \(world)`")
+    }
+
+    public func rename(world: String, computer: String) async throws -> String? {
+        throw FeedError.needsHost("run `familiar fleet rename \(world) \"\(computer)\"`")
+    }
+
+    public func setAutomations(world: String, automations: [Automation]) async throws -> String? {
+        let d = try dir(world)
+        let enc = JSONEncoder(); enc.outputFormatting = [.sortedKeys]
+        let tmp = d.appendingPathComponent(".automations.json.tmp")
+        try enc.encode(automations.map(\.rawValue)).write(to: tmp)
+        _ = try FileManager.default.replaceItemAt(d.appendingPathComponent("automations.json"), withItemAt: tmp)
+        return "granted; she picks it up on her next start"
+    }
+
+    public func setCaptain(world: String, captain: String) async throws -> String? {
+        let d = try dir(world)
+        let url = d.appendingPathComponent("captain.json")
+        var obj = try JSONDecoder().decode([String: JSONValue].self, from: Data(contentsOf: url))
+        obj["captain"] = .string(captain)
+        let enc = JSONEncoder(); enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let tmp = d.appendingPathComponent(".captain.json.tmp")
+        try enc.encode(obj).write(to: tmp)
+        _ = try FileManager.default.replaceItemAt(url, withItemAt: tmp)
+        return nil
+    }
+}

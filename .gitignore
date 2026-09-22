@@ -1,2 +1,8 @@
 /target
 .DS_Store
+
+# Swift / Xcode
+.build/
+DerivedData/
+ios/build/
+*.xcuserdatad

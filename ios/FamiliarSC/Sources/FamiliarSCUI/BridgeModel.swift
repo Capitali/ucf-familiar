@@ -1,0 +1,411 @@
+import Foundation
+import Observation
+import FamiliarSC
+
+/// The bridge's state: the fleet, and one ship's bridge at a time. `@Observable`, so the
+/// screens track only what they read. Every load is a plain async read of the feed; every
+/// act goes through `CaptainActs` and then re-reads, so the screen shows the store's truth,
+/// never a local guess.
+@Observable
+public final class BridgeModel {
+    public let feed: any ShipsFeed
+    public let acts: any CaptainActs
+    public var voiceConsent: VoiceConsent
+
+    public var ships: [ShipSummary] = []
+    public var loading = false
+    public var error: String?
+
+    /// The open ship.
+    public var world: String?
+    public var persona: Persona?
+    public var journal: [JournalEntry] = []
+    public var window: [MessageItem] = []
+    public var dial: DialSheet?
+    public var book: ShipBook?
+    /// The hull's earned history (T-239): routes flown, deliveries, repairs, refits, distress
+    /// survived — computed here from the journal and the book, never served, never editable.
+    public var history: ShipHistory?
+    /// The captain's money over a window (T-241) — read when the screen opens, not with the
+    /// bridge: the host reads the exchange's ledger for every hull to answer it.
+    public var economy: CaptainEconomy?
+    public var economyWindow = "7d"
+    public var economyError: String?
+    public var loadingEconomy = false
+    public var reports: [FoldReport] = []
+    public var spoken: SpokenReport?
+    public var pendingDialChanges: [DialChange] = []
+    /// The orders the captain gave in conversation (T-252), waiting for FILE.
+    public var pendingOrders: [OrderRequest] = []
+    /// What the host said when they were filed, or why not.
+    public var orderOutcome: String?
+    /// Direct mode: what the pilot's mind would file now, held for the captain's confirm
+    /// (T-237 B4 finding 3). Nil through a host — there the pilot files and proposes itself.
+    public var pilotProposal: PilotProposal?
+    /// What the last confirm said — the exchange's clock, or the refusal.
+    public var pilotOutcome: String?
+    /// The captain's conversation with her, for the open ship.
+    public var conversation: Conversation?
+    var conversationWorld: String?
+    public var turns: [Conversation.Turn] = []
+    public var asking = false
+    /// Speak her answers aloud (on by default; the captain can mute).
+    public var speakAnswers = true
+    public let speaker = Speaker()
+    public let dictation = Dictation()
+
+    /// One fold-window of the journal, told.
+    public struct FoldReport: Identifiable, Equatable {
+        public var id: Int64 { fromTick }
+        public var fromTick: Int64
+        public var toTick: Int64
+        public var report: BridgeReport
+    }
+
+    public init(feed: any ShipsFeed, acts: any CaptainActs, voiceConsent: VoiceConsent = VoiceConsent()) {
+        self.feed = feed; self.acts = acts; self.voiceConsent = voiceConsent
+    }
+
+    public var summary: ShipSummary? { ships.first { $0.world == world } }
+    public var computerName: String { persona?.name ?? summary?.computer ?? "the ship's computer" }
+    /// The record's word for the computer — its pronouns, else its name, else `it` — so every
+    /// title on the bridge follows the record, never a default (Ian, 2026-09-09; #6: Felix
+    /// chose he/him and build 7 said "her").
+    public var spokenOf: SpokenOf { persona?.spokenOf ?? summary?.spokenOf ?? SpokenOf.of(name: nil, pronouns: nil) }
+
+    /// A cancelled read is not an error: a view's `.task` is cancelled whenever SwiftUI
+    /// tears the view down or a pull-to-refresh supersedes it, and the request it was
+    /// awaiting comes back as URLError.cancelled (NSURLErrorDomain -999). The last good
+    /// state stays on screen; nothing is reported (Ian's iPad, 2026-09-04).
+    static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let u = error as? URLError, u.code == .cancelled { return true }
+        let ns = error as NSError
+        return ns.domain == NSURLErrorDomain && ns.code == NSURLErrorCancelled
+    }
+
+    /// Error text a captain can read — the platform's sentence, not an NSError dump.
+    static func describe(_ error: Error) -> String {
+        if let f = error as? FeedError { return f.description }
+        if let u = error as? URLError { return u.localizedDescription }
+        return (error as NSError).localizedDescription
+    }
+
+    @MainActor
+    private func report(_ error: Error) {
+        guard !BridgeModel.isCancellation(error) else { return }
+        self.error = BridgeModel.describe(error)
+    }
+
+    /// One fleet read at a time: a second caller awaits the read in flight instead of
+    /// starting another (the root's `.task` and the Ships tab's both refresh on appear).
+    private var refreshInFlight: Task<Void, Never>?
+
+    @MainActor
+    public func refreshShips() async {
+        if let t = refreshInFlight { await t.value; return }
+        let t = Task { @MainActor in
+            loading = true; defer { loading = false }
+            do { ships = try await feed.ships(); error = nil } catch { report(error) }
+        }
+        refreshInFlight = t
+        await t.value
+        refreshInFlight = nil
+    }
+
+    /// Every `open` takes a generation; a read that resumes under a later generation
+    /// publishes nothing (codex T-236 r3, finding 8: two overlapping opens had no token, so
+    /// either could resume after the other and publish its persona under the later world).
+    private var openGeneration = 0
+    /// The lane that answers a question — the conversation's own `ask`. A seam so a test can
+    /// hold an answer in flight across a ship switch; production never reassigns it.
+    var asker: @MainActor (Conversation, String) async -> Conversation.Turn = { await $0.ask($1) }
+
+    @MainActor
+    public func open(world: String, foldWindowTicks: Int64 = 96, windows: Int = 6) async {
+        // Switching ships: nothing of the previous captain may be readable or speakable under
+        // the new world for even the length of a read. The voice is cleared BEFORE the world
+        // is published and the reads begin; a failed open then has nothing to expose, and
+        // `ask` is gated on the conversation's world besides (codex T-236 r2, finding 8).
+        // A refresh of the SAME ship keeps its voice while the reads run.
+        if self.world != world { await MainActor.run { clearVoice() } }
+        self.world = world
+        openGeneration += 1
+        let gen = openGeneration
+        loading = true
+        defer { if gen == openGeneration { loading = false } }
+        // Read the whole bridge into locals and publish only once every required read
+        // has succeeded. A broken captain persona on the newly selected ship (the host
+        // refuses to fall through, T-236) must not leave the PREVIOUS captain's name,
+        // conversation, journal or context live under this ship's summary (codex, T-236
+        // re-verification finding 8).
+        do {
+            let p = try await feed.persona(world: world)
+            guard gen == openGeneration else { return }
+            let j = try await feed.journal(world: world, sinceTick: nil)
+            guard gen == openGeneration else { return }
+            let w = try await feed.window(world: world)
+            guard gen == openGeneration else { return }
+            let d = try await feed.dial(world: world)
+            guard gen == openGeneration else { return }
+            let b = try await feed.book(world: world)
+            // A later open has taken the bridge while these reads ran: this one is stale and
+            // publishes nothing — not the persona, not the journal, not a conversation.
+            guard gen == openGeneration else { return }
+            persona = p; journal = j; window = w; dial = d; book = b
+            let names = (try? await feed.names(world: world)) ?? []
+            guard gen == openGeneration else { return }
+            history = ShipHistory.from(journal: j, book: b, names: names)
+            reports = BridgeModel.fold(journal: journal, persona: persona, windowTicks: foldWindowTicks, count: windows, openProposals: openProposals)
+            var (frame, docs) = (try? await feed.context(world: world, worldInstance: summary?.worldInstance)) ?? (nil, [])
+            guard gen == openGeneration else { return }
+            // Her story rides the context frame so the voice can tell it — grounded on the marks.
+            if let h = history { docs.append(ContextDocument(name: "history", title: "the ship's story — \(spokenOf.possessive) earned history: routes flown, deliveries, repairs and refits, distress survived, each with the journal ticks it came from; nothing here can be bought or edited", text: h.story)) }
+            let frameLine = frame ?? summary.map { "ship, hull \($0.shipName) (\($0.worldInstance)), captain \($0.captain), computer \(computerName)" }
+            let ctx = BridgeContext(entries: latestWindow(), hull: summary?.hullGlance, openProposals: openProposals, frame: frameLine, documents: docs)
+            // The act the mind would file, if any. A proposal already shown for the SAME act keeps
+            // its actionId across a refresh: a transport failure after the exchange accepted it,
+            // then a pull-to-refresh and a second tap, must retry the id and not file twice.
+            let fresh = try? await acts.pilotProposal(world: world)
+            guard gen == openGeneration else { return }
+            if let old = pilotProposal, let new = fresh, old.act == new.act { pilotProposal = old } else { pilotProposal = fresh }
+            if let c = conversation, c.voice.persona.name == (persona?.name ?? computerName), conversationWorld == world {
+                c.context = ctx; c.consent = voiceConsent
+            } else {
+                conversationWorld = world
+                conversation = Conversation(voice: BridgeVoice(persona: persona ?? Persona(name: computerName, style: nil)), context: ctx, consent: voiceConsent)
+                // Warm the model before the first question (T-253).
+                conversation?.prewarm()
+                turns = []
+            }
+            error = nil
+        } catch {
+            // A stale open's failure is not this bridge's failure to report.
+            guard gen == openGeneration else { return }
+            if !BridgeModel.isCancellation(error) || conversationWorld != world { clearVoice() }
+            report(error)
+        }
+    }
+
+    /// Read the captain's economy for the open ship (T-241). A window given here becomes the
+    /// screen's; a stale open's answer is dropped like every other read's.
+    public func loadEconomy(window: String? = nil) async {
+        guard let world else { return }
+        if let window, CaptainEconomy.windows.contains(window) { economyWindow = window }
+        let gen = openGeneration
+        loadingEconomy = true
+        defer { if gen == openGeneration { loadingEconomy = false } }
+        do {
+            let e = try await feed.economy(world: world, window: economyWindow)
+            guard gen == openGeneration else { return }
+            economy = e
+            economyError = e == nil ? "this host does not serve the captain's ledger" : nil
+        } catch {
+            guard gen == openGeneration, !BridgeModel.isCancellation(error) else { return }
+            economy = nil
+            economyError = BridgeModel.describe(error)
+        }
+    }
+
+    /// Nothing of a previously opened ship may speak for this one: no persona, no
+    /// conversation, no turns, no journal or window or reports. The fleet summary (ship
+    /// facts the host served) and the visible error remain.
+    @MainActor
+    func clearVoice() {
+        persona = nil; journal = []; window = []; dial = nil; book = nil; reports = []; spoken = nil; history = nil
+        economy = nil; economyError = nil
+        pendingOrders = []; orderOutcome = nil
+        pilotProposal = nil; pilotOutcome = nil
+        conversation = nil; conversationWorld = nil; turns = []
+    }
+
+    /// The journal slice the latest fold report was told from.
+    func latestWindow() -> [JournalEntry] {
+        guard let latest = reports.first else { return journal.suffix(60).map { $0 } }
+        return journal.filter { e in
+            guard let t = e.tick else { return false }
+            return t >= latest.fromTick && t <= latest.toTick
+        }
+    }
+
+    /// Her advice, once per standing line, newest last.
+    public var advice: [MessageItem] {
+        MessageWindow.collapsed(window).filter { if case .advice = $0.kind { return true }; return false }
+    }
+
+    /// What she says now: the last answer, else the latest fold's headline.
+    public var sayingNow: String {
+        if let t = turns.last { return t.answer }
+        if let r = reports.first { return r.report.headline + " " + r.report.nextAct }
+        return "Nothing to report yet."
+    }
+
+    /// Ask her, by voice or by text. Speaks the answer when `speakAnswers` is on.
+    @MainActor
+    public func ask(_ question: String, spoken: Bool) async {
+        let q = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        // The final invariant: only a conversation that belongs to the open world may answer,
+        // and not while that world is still being read.
+        guard !q.isEmpty, let c = conversation, let askedWorld = world, conversationWorld == askedWorld, !loading else { return }
+        asking = true; defer { asking = false }
+        let turn = await asker(c, q)
+        // The gate again, AFTER the answer: this actor is re-entrant at the await, and a ship
+        // switch in the meantime cleared the voice. The previous captain's answer must not be
+        // appended or spoken under the new ship (codex T-236 r3, finding 8).
+        guard world == askedWorld, conversationWorld == askedWorld, conversation === c else { return }
+        turns.append(turn)
+        let given = c.voice.takeOrders()
+        if !given.isEmpty { pendingOrders = given; orderOutcome = nil }
+        if speakAnswers, spoken || turns.count > 0 { speaker.speak(turn.answer) }
+    }
+
+    /// FILE: the captain's tap sends every waiting order to the pilots. A fleet order is
+    /// one request; the host answers hull by hull. Orders that filed leave the list; one
+    /// the host refused stays, with the refusal beside it.
+    @MainActor
+    public func fileOrders() async {
+        guard let world, !pendingOrders.isEmpty else { return }
+        var said: [String] = []
+        var kept: [OrderRequest] = []
+        for o in pendingOrders {
+            do { said.append(try await acts.order(o, world: world)) }
+            catch { kept.append(o); said.append("\(o.sentence): \(BridgeModel.describe(error))") }
+        }
+        pendingOrders = kept
+        orderOutcome = said.joined(separator: " ")
+        if kept.isEmpty { await open(world: world) }
+    }
+
+    public func dismissOrders() { pendingOrders = []; orderOutcome = nil }
+
+    /// Press to talk: start listening; press again to stop and ask what was said.
+    @MainActor
+    public func toggleListening() async {
+        if dictation.listening {
+            let said = await dictation.stop()
+            await ask(said, spoken: true)
+        } else {
+            speaker.stop()
+            await dictation.start()
+        }
+    }
+
+    public var openProposals: Int { window.filter(\.needsTheCaptain).count }
+
+    /// The journal cut into fold windows of `windowTicks`, newest first, each told by the
+    /// templated floor — deterministic, instant, and the grounding for the spoken one.
+    public static func fold(journal: [JournalEntry], persona: Persona?, windowTicks: Int64, count: Int, openProposals: Int) -> [FoldReport] {
+        guard let last = journal.last(where: { $0.tick != nil })?.tick else { return [] }
+        let voice = TemplatedVoice(persona: persona ?? Persona(name: "?", style: nil))
+        var out: [FoldReport] = []
+        var to = last
+        for i in 0..<count {
+            let from = to - windowTicks + 1
+            let slice = journal.filter { e in
+                if let t = e.tick { return t >= from && t <= to }
+                return false
+            }
+            if !slice.isEmpty || i == 0 {
+                out.append(FoldReport(fromTick: max(from, 0), toTick: to, report: voice.report(entries: slice, openProposals: i == 0 ? openProposals : 0)))
+            }
+            to = from - 1
+            if to < 0 { break }
+        }
+        return out
+    }
+
+    /// Speak the latest window through the ladder (on-device / PCC / floor).
+    @MainActor
+    public func speakLatest(question: String = "What did you do today?") async {
+        guard let latest = reports.first else { return }
+        let slice = journal.filter { e in
+            guard let t = e.tick else { return false }
+            return t >= latest.fromTick && t <= latest.toTick
+        }
+        let voice = BridgeVoice(persona: persona ?? Persona(name: computerName, style: nil))
+        let ctx = BridgeContext(entries: slice, hull: summary?.hullGlance, openProposals: openProposals, question: question)
+        spoken = await voice.speak(ctx, consent: voiceConsent)
+        pendingDialChanges = voice.pendingDialChanges
+    }
+
+    @MainActor
+    public func approve(id: String, approved: Bool) async {
+        guard let world else { return }
+        do {
+            try await acts.approve(world: world, proposalID: id, approved: approved)
+            window = try await feed.window(world: world)
+            error = nil
+        } catch { report(error) }
+    }
+
+    @MainActor
+    public func save(dial newDial: AutonomyDial) async {
+        guard let world else { return }
+        do {
+            try await acts.setDial(world: world, dial: newDial)
+            dial = try await feed.dial(world: world)
+            error = nil
+        } catch { report(error) }
+    }
+
+    @MainActor
+    public func pair(_ request: PairingRequest, key: PairingKey) async -> String? {
+        do { try await acts.pair(request, key: key); await refreshShips(); return nil } catch { return "\(error)" }
+    }
+
+    /// The captain's edits to a paired ship; each re-reads the fleet so the screen shows the
+    /// store's truth. Returns the outcome to show: the host's note, or the error.
+    public struct ActOutcome: Equatable { public var ok: Bool; public var text: String }
+
+    @MainActor
+    public func rename(computer: String) async -> ActOutcome {
+        guard let world else { return ActOutcome(ok: false, text: "no ship open") }
+        do { let n = try await acts.rename(world: world, computer: computer); await refreshShips(); persona = try await feed.persona(world: world)
+             return ActOutcome(ok: true, text: n ?? "Renamed.") } catch { return ActOutcome(ok: false, text: "\(error)") }
+    }
+
+    @MainActor
+    public func setAutomations(_ automations: [Automation]) async -> ActOutcome {
+        guard let world else { return ActOutcome(ok: false, text: "no ship open") }
+        do { let n = try await acts.setAutomations(world: world, automations: automations); await refreshShips(); dial = try await feed.dial(world: world)
+             return ActOutcome(ok: true, text: n ?? "Saved.") } catch { return ActOutcome(ok: false, text: "\(error)") }
+    }
+
+    @MainActor
+    public func setCaptain(_ captain: String) async -> ActOutcome {
+        guard let world else { return ActOutcome(ok: false, text: "no ship open") }
+        do { let n = try await acts.setCaptain(world: world, captain: captain); await refreshShips(); persona = try await feed.persona(world: world)
+             return ActOutcome(ok: true, text: n ?? "Moved.") } catch { return ActOutcome(ok: false, text: "\(error)") }
+    }
+
+    /// The captain confirms the pilot's proposed act. On success the proposal is spent and the
+    /// bridge re-reads; on a refusal (the mind moved) the bridge re-reads and shows the new
+    /// mind; on any other failure the proposal STAYS, actionId and all, so a retry is a retry.
+    @MainActor
+    public func confirmPilotAct() async -> ActOutcome {
+        guard let world, let p = pilotProposal else { return ActOutcome(ok: false, text: "nothing to confirm") }
+        do {
+            let said = try await acts.confirm(p, world: world)
+            pilotProposal = nil
+            await open(world: world)
+            pilotOutcome = said   // after the re-read, which may clear a stale outcome
+            return ActOutcome(ok: true, text: said)
+        } catch let e as FeedError {
+            if case .refused = e { pilotProposal = nil; await open(world: world) }
+            pilotOutcome = e.description
+            return ActOutcome(ok: false, text: e.description)
+        } catch {
+            pilotOutcome = "\(error)"
+            return ActOutcome(ok: false, text: "\(error)")
+        }
+    }
+
+    /// "Not now": the proposal is dropped, its actionId with it. The next read mints a new one.
+    @MainActor
+    public func dismissPilotAct() { pilotProposal = nil; pilotOutcome = nil }
+
+    @MainActor
+    public func unpair(world: String) async -> String? {
+        do { try await acts.unpair(world: world); await refreshShips(); return nil } catch { return "\(error)" }
+    }
+}

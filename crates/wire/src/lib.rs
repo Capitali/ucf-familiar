@@ -134,10 +134,10 @@ mod tests {
 
     #[test]
     fn urls_parse_or_refuse_and_never_carry_credentials() {
-        let u = Url::parse("https://srv1328560.hstgr.cloud/mcp").unwrap();
+        let u = Url::parse("https://exchange.example/mcp").unwrap();
         assert!(u.https && u.port == 443 && u.path == "/mcp");
-        assert_eq!(u.origin(), "https://srv1328560.hstgr.cloud");
-        assert_eq!(u.host_header(), "srv1328560.hstgr.cloud");
+        assert_eq!(u.origin(), "https://exchange.example");
+        assert_eq!(u.host_header(), "exchange.example");
 
         let p = Url::parse("http://127.0.0.1:8181/mcp").unwrap();
         assert!(!p.https && p.port == 8181 && p.is_loopback());
