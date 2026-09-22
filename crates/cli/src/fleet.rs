@@ -56,6 +56,20 @@ pub struct Captain {
     /// operational binding stays `(server, key_id)`.
     #[serde(default)]
     pub hull_name: String,
+    /// The hull's DURABLE id on the exchange (`/v1/me.actor`, e.g. `player:…` or
+    /// `key:…`), learned at pairing.
+    ///
+    /// The binding above — `(server, key_id)` — assumed a key meant one ship. Since
+    /// the exchange let a captain step between their own hulls at a shared berth
+    /// (2026-09-21), a CAPTAIN'S key answers for whichever hull its captain stands
+    /// on, so that assumption can break under a running pilot. This is the fact the
+    /// pilot checks every fold before it files anything; the display name cannot
+    /// serve, because a hull may be renamed without changing ships.
+    ///
+    /// Empty on a record written before this existed, and on a world whose key never
+    /// answered; the check is skipped rather than guessed at.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hull_actor: String,
     /// Extra arguments for this ship's pilot (a LOCAL soak passes `--allow-paws`
     /// and a short `--interval-floor`; a PROD hull passes nothing).
     #[serde(default)]
@@ -742,6 +756,7 @@ fn rec_default() -> Captain {
         automations: vec![],
         paired_at: 0,
         hull_name: String::new(),
+        hull_actor: String::new(),
         pilot_args: vec![],
         exchange_captain_id: String::new(),
     }
@@ -1250,6 +1265,11 @@ pub fn cmd_fleet(args: &[String]) -> ExitCode {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
+            let hull_actor = me
+                .get("actor")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             // Grant only what the KEY can file. A co-pilot key (read + auto:freight)
             // hauls and nothing else; a read-only key watches. Pairing KBC-04 with
             // trade and outfit on a co-pilot key had its merchant filing a buy every
@@ -1334,6 +1354,7 @@ pub fn cmd_fleet(args: &[String]) -> ExitCode {
                 automations: automations.clone(),
                 paired_at: super::now_secs(),
                 hull_name: ship_name.clone(),
+                hull_actor: hull_actor.clone(),
                 pilot_args: f
                     .get("pilot-args")
                     .map(|s| s.split_whitespace().map(String::from).collect())
@@ -2808,6 +2829,7 @@ mod captain_store_tests {
             automations: vec![],
             paired_at: 0,
             hull_name: String::new(),
+            hull_actor: String::new(),
             pilot_args: vec![],
             exchange_captain_id: String::new(),
         }

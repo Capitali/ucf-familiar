@@ -559,6 +559,30 @@ fn main() -> ExitCode {
                "exchange": wire.base, "automations": granted.iter().map(|a| format!("{a:?}")).collect::<Vec<_>>()}),
     );
 
+    // WHICH HULL THIS KEY ANSWERS FOR (2026-09-21, the exchange's `transferCaptain`).
+    //
+    // The store binds a world to `(server, key_id)` and treats the hull as whatever that
+    // key answers for. That was safe while a key meant one ship. It is not any more: a
+    // captain may now step from one of their hulls to another at a shared berth, and from
+    // then on the CAPTAIN'S OWN key answers `/v1/me` for the hull they stand on. A pilot
+    // flying on a captain's key would keep folding — booking, spending, filing orders —
+    // against a ship its own directory does not describe, and nothing in the journal would
+    // say so. (Co-pilot keys stay with their hull and are unaffected.)
+    //
+    // So the actor id is learned once per run and checked every fold. It is the durable
+    // hull identity the store never had; the display name is not, since a hull can be
+    // renamed without changing ships.
+    let expected_actor: Option<String> = std::fs::read_to_string(ship_dir.join("captain.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| {
+            v.get("hull_actor")
+                .and_then(Value::as_str)
+                .filter(|a| !a.is_empty())
+                .map(String::from)
+        });
+    let mut hull_changed_said = false;
+
     // The chart: which stations sell fuel. Read once; a content change is a new world.
     let pumps: BTreeSet<String> = match wire.get("/v1/stations") {
         Ok(v) => ucf_pilot::wire::pumps_from(&v),
@@ -865,6 +889,39 @@ fn main() -> ExitCode {
                 continue;
             }
         };
+        // The hull under us is still ours, or we do nothing (see `expected_actor`).
+        // Holding is the whole point: a wrong-hull fold is worse than a missed one.
+        if let Some(want) = expected_actor.as_deref() {
+            let now_actor = me.get("actor").and_then(Value::as_str).unwrap_or("");
+            if !now_actor.is_empty() && now_actor != want {
+                if !hull_changed_said {
+                    let hull = me
+                        .get("shipName")
+                        .and_then(Value::as_str)
+                        .unwrap_or("another hull");
+                    journal(
+                        &ship_dir,
+                        json!({"at": now_secs(), "event": "hull-changed",
+                               "expected": want, "answering_for": now_actor, "hull": hull,
+                               "why": "this key now answers for a hull this world does not \
+                                       describe — the captain moved aboard another of their \
+                                       ships. Nothing will be filed until the captain moves \
+                                       back, or this world is re-paired to the hull it means."}),
+                    );
+                    hull_changed_said = true;
+                }
+                std::thread::sleep(Duration::from_secs(tick_secs.max(floor_secs)));
+                continue;
+            }
+            if hull_changed_said {
+                journal(
+                    &ship_dir,
+                    json!({"at": now_secs(), "event": "hull-restored", "actor": want,
+                           "why": "the captain is aboard this hull again; the pilot resumes"}),
+                );
+                hull_changed_said = false;
+            }
+        }
         let mut ship = ucf_pilot::wire::ship_from(&me, repair_rate);
         ship.fuel_price = fuel_price;
         // The captain's standing course, re-read every fold: while it stands

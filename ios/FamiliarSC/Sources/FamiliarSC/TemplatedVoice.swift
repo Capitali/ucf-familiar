@@ -60,11 +60,11 @@ public struct TemplatedVoice {
     static func severity(_ e: JournalEntry) -> Int {
         switch e.event {
         case "distress-hold": return 9
-        case "refused-at-the-door", "exchange-unreachable", "trade-refused", "pay-down-refused": return 8
+        case "refused-at-the-door", "exchange-unreachable", "trade-refused", "pay-down-refused", "hull-changed": return 8
         case "proposed", "proposal-lapsed": return 7
         case "traded", "position-opened", "load-closed", "outfitted", "trade-outcome", "fill", "paid-down", "frame-expanded", "order-done": return 6
         case "advice", "carry-blocked", "carry-refused", "engage-refused", "refit-refused", "book-corrected", "retargeted": return 5
-        case "acted", "engaged-drive", "carry-to-market", "unwedged-course", "adopted-held-contract", "freight", "order-underway": return 4
+        case "acted", "engaged-drive", "carry-to-market", "unwedged-course", "adopted-held-contract", "freight", "order-underway", "hull-restored": return 4
         case "held-at-the-gate", "watch-begins", "forecast", "dispatch", "fleet-inbound", "order-waits", "under-orders", "tour": return 3
         case "holding", "merchant-idle", "outfit-idle", "awaiting-pending-actions", "awaiting-our-own-fold": return 0
         // Unknown: shown, neutrally — except that a word the runner ends in "-refused" is a
@@ -298,6 +298,10 @@ public struct TemplatedVoice {
             return "\(t(e)): standing order \(s("order")) (\(s("verb"))) refused — \(s("why"))"
         case "order-waits":
             return "\(t(e)): standing order \(s("order")) (\(s("verb"))) waits — \(s("why"))"
+        case "hull-changed":
+            return "\(t(e)): I am not flying — this key now answers for \(s("hull")), not the ship this world means. The captain has moved aboard another of their hulls; nothing will be filed until they move back."
+        case "hull-restored":
+            return "\(t(e)): the captain is aboard again; I have the right ship and I am flying."
         case "order-underway":
             return "\(t(e)): under way to \(s("to")) for your hold there, arrives t\(i("resolves"))"
         case "under-orders":

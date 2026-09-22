@@ -22,6 +22,8 @@
     "frame-refused",
     "held-at-the-gate",
     "holding",
+    "hull-changed",
+    "hull-restored",
     "load-closed",
     "merchant-idle",
     "order-done",

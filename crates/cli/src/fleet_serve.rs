@@ -1610,6 +1610,7 @@ mod surface_tests {
             captain_id: captain_id.into(),
             captain: captain.into(),
             key_id: "k".into(),
+            hull_actor: String::new(),
             server: "http://127.0.0.1:1".into(),
             automations: vec![],
             paired_at: 0,
