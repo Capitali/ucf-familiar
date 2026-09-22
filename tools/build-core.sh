@@ -1,48 +1,68 @@
 #!/bin/bash
-# build-core.sh — the embeddable familiar core for Apple shells (ADR-0009 Phase 0).
+# build-core.sh — the embeddable pilot core for the Apple shell.
 # Produces ios/FamiliarCore/: generated Swift bindings + FamiliarCore.xcframework
-# (device + simulator static libs). Run from the repo root.
+# (device + simulator static libs) from THIS repo's `ucf-pilot`, so the doctrine the
+# app answers with is the doctrine the fleet flies. Run from the repo root.
+#
+# One function crosses: whiskerAdvise(inputJson:) — see crates/core-ffi/src/lib.rs.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 OUT=ios/FamiliarCore
 GEN="$OUT/Generated"
 
-# The core's minimum OS is the app's declared floor (ADR-0046) — pinned here so the
-# archive can never silently carry whatever the building machine's SDK defaulted to
-# (the 2026-08-25 review found 26.5- and 14.0-min objects inside one archive). Both
-# rustc's Apple targets and cc-built C objects honor this variable.
+# The core's minimum OS is the app's declared floor (ios/project.yml deploymentTarget)
+# — pinned here so the archive can never silently carry whatever the building machine's
+# SDK defaulted to. Both rustc's Apple targets and cc-built C objects honor this.
 FLOOR=26.0
 export IPHONEOS_DEPLOYMENT_TARGET="$FLOOR"
 
+# The generator lives behind the `cli` feature so the device archive never carries it
+# (see crates/core-ffi/Cargo.toml). Only these two host steps ask for it.
 echo "== host dylib (for binding generation) =="
-cargo build -p familiar-core-ffi --release
+cargo build -p ucf-core-ffi --release --features cli
 
 echo "== swift bindings =="
 rm -rf "$GEN" && mkdir -p "$GEN"
-cargo run -p familiar-core-ffi --bin uniffi-bindgen -- generate \
+cargo run -p ucf-core-ffi --release --features cli --bin uniffi-bindgen -- generate \
   --library target/release/libfamiliar_core.dylib \
   --language swift --out-dir "$GEN"
 
 echo "== device + simulator static libs (min iOS $FLOOR) =="
-cargo build -p familiar-core-ffi --release --target aarch64-apple-ios
-cargo build -p familiar-core-ffi --release --target aarch64-apple-ios-sim
+cargo build -p ucf-core-ffi --release --target aarch64-apple-ios
+cargo build -p ucf-core-ffi --release --target aarch64-apple-ios-sim
 
 echo "== xcframework =="
-HDR=/tmp/familiar-core-headers
-rm -rf "$HDR" && mkdir -p "$HDR"
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+HDR="$WORK/headers"
+mkdir -p "$HDR"
 cp "$GEN"/familiar_coreFFI.h "$HDR"/
 cp "$GEN"/familiar_coreFFI.modulemap "$HDR"/module.modulemap
+
+# Strip DWARF from a COPY of each slice — never from cargo's own output, which cargo
+# would then hand to the next build as if it were fresh. `-S` drops debug sections and
+# keeps the symbol table, so the app's dSYM still names every Rust frame; what is lost
+# is file-and-line inside the core, and that buys ~6 MB a slice on an archive that is
+# checked in and rebuilt with every change to doctrine.
+# (Each copy keeps the name libfamiliar_core.a — xcframework slices are named after
+# the file they were built from, and the app links -lfamiliar_core.)
+for arch in aarch64-apple-ios aarch64-apple-ios-sim; do
+  mkdir -p "$WORK/$arch"
+  cp "target/$arch/release/libfamiliar_core.a" "$WORK/$arch/libfamiliar_core.a"
+  strip -S "$WORK/$arch/libfamiliar_core.a"
+done
+
 rm -rf "$OUT/FamiliarCore.xcframework"
 xcodebuild -create-xcframework \
-  -library target/aarch64-apple-ios/release/libfamiliar_core.a -headers "$HDR" \
-  -library target/aarch64-apple-ios-sim/release/libfamiliar_core.a -headers "$HDR" \
+  -library "$WORK/aarch64-apple-ios/libfamiliar_core.a" -headers "$HDR" \
+  -library "$WORK/aarch64-apple-ios-sim/libfamiliar_core.a" -headers "$HDR" \
   -output "$OUT/FamiliarCore.xcframework"
 
 echo "== verify: no object in either slice requires newer than iOS $FLOOR =="
 # Objects OLDER than the floor are fine (Rust ships its precompiled std at the
 # toolchain's own minimum — those objects load anywhere at or above it). What must
-# never happen is an object NEWER than the floor: that is the 26.5-in-a-26.0-app
-# defect the 2026-08-25 review caught, and the linker only warns instead of failing.
+# never happen is an object NEWER than the floor: an app declaring 26.0 that carries a
+# 26.5-min object only draws a linker WARNING, and then fails on a 26.0 device.
 for lib in "$OUT"/FamiliarCore.xcframework/ios-arm64/libfamiliar_core.a \
            "$OUT"/FamiliarCore.xcframework/ios-arm64-simulator/libfamiliar_core.a; do
   stray=$(otool -l "$lib" | awk -v floor="$FLOOR" \
@@ -52,4 +72,4 @@ for lib in "$OUT"/FamiliarCore.xcframework/ios-arm64/libfamiliar_core.a \
     exit 1
   fi
 done
-echo "✓ $OUT ready — link the xcframework + compile Generated/familiar_core.swift into the app"
+echo "✓ $OUT ready ($(du -sh "$OUT/FamiliarCore.xcframework" | cut -f1)) — link the xcframework + compile Generated/familiar_core.swift into the app"

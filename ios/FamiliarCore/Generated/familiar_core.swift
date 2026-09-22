@@ -399,30 +399,6 @@ fileprivate class UniffiHandleMap<T> {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterBool : FfiConverter {
-    typealias FfiType = Int8
-    typealias SwiftType = Bool
-
-    public static func lift(_ value: Int8) throws -> Bool {
-        return value != 0
-    }
-
-    public static func lower(_ value: Bool) -> Int8 {
-        return value ? 1 : 0
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Bool {
-        return try lift(readInt(&buf))
-    }
-
-    public static func write(_ value: Bool, into buf: inout [UInt8]) {
-        writeInt(&buf, lower(value))
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
 fileprivate struct FfiConverterString: FfiConverter {
     typealias SwiftType = String
     typealias FfiType = RustBuffer
@@ -461,105 +437,15 @@ fileprivate struct FfiConverterString: FfiConverter {
     }
 }
 /**
- * The human speaks to their familiar (the console answer path).
- */
-public func answer(dataDir: String, human: String, text: String) {try! rustCall() {
-    uniffi_familiar_core_fn_func_answer(
-        FfiConverterString.lower(dataDir),
-        FfiConverterString.lower(human),
-        FfiConverterString.lower(text),$0
-    )
-}
-}
-/**
- * Found a new familiar: mint the node key and create its own group. The first person
- * anywhere begins here — node #1, population 1, nothing else required. Returns the
- * group id, or an error string.
- */
-public func found(dataDir: String, label: String) -> String {
-    return try!  FfiConverterString.lift(try! rustCall() {
-    uniffi_familiar_core_fn_func_found(
-        FfiConverterString.lower(dataDir),
-        FfiConverterString.lower(label),$0
-    )
-})
-}
-/**
- * Mint an invitation for a new device/peer: the enrollment payload as JSON (group
- * secret included — trusted screens only).
- */
-public func invitePayload(dataDir: String) -> String {
-    return try!  FfiConverterString.lift(try! rustCall() {
-    uniffi_familiar_core_fn_func_invite_payload(
-        FfiConverterString.lower(dataDir),$0
-    )
-})
-}
-/**
- * Whether a familiar already lives in this data dir (found or joined).
- */
-public func isFounded(dataDir: String) -> Bool {
-    return try!  FfiConverterBool.lift(try! rustCall() {
-    uniffi_familiar_core_fn_func_is_founded(
-        FfiConverterString.lower(dataDir),$0
-    )
-})
-}
-/**
- * Join an existing familiar from an enrollment payload (the QR / share-link body).
- * Returns the group id, or an error string.
- */
-public func join(dataDir: String, label: String, secret: String, groupLabel: String) -> String {
-    return try!  FfiConverterString.lift(try! rustCall() {
-    uniffi_familiar_core_fn_func_join(
-        FfiConverterString.lower(dataDir),
-        FfiConverterString.lower(label),
-        FfiConverterString.lower(secret),
-        FfiConverterString.lower(groupLabel),$0
-    )
-})
-}
-/**
- * Start the gossip transport (TLS mesh port + LAN discovery) inside this process.
- */
-public func meshStart(dataDir: String) {try! rustCall() {
-    uniffi_familiar_core_fn_func_mesh_start(
-        FfiConverterString.lower(dataDir),$0
-    )
-}
-}
-/**
- * Stop the gossip transport.
- */
-public func meshStop() {try! rustCall() {
-    uniffi_familiar_core_fn_func_mesh_stop($0
-    )
-}
-}
-/**
- * The ship's computer's MIND, in the shell's hand (T-237 B4, "one doctrine, two
- * runtimes"). The shell fetches `/v1/me`, `/v1/loadboard`, `/v1/stations` and the
- * routes it wants priced with the captain's own key, hands them over as one JSON
- * object (see `familiar_whisker::wire::advise`), and gets back what the pilot would
- * do now: the decision, the dial surface it spends, the captain's level on it, the
- * automation it needs. Byte-for-byte the doctrine the host runner flies; this never
- * acts — acting is the shell's, under the captain's tap and the act scope.
+ * The pilot's doctrine over wire JSON the shell fetched itself. Input is the object
+ * [`ucf_pilot::wire::advise`] documents (`me`, `board`, `stations`, the priced routes,
+ * the key's `denied` list...); the answer is that function's verdict JSON, or an
+ * `{"error": ...}` object if the input was not JSON at all. Never touches the world.
  */
 public func whiskerAdvise(inputJson: String) -> String {
     return try!  FfiConverterString.lift(try! rustCall() {
     uniffi_familiar_core_fn_func_whisker_advise(
         FfiConverterString.lower(inputJson),$0
-    )
-})
-}
-/**
- * The worldview, exactly as the read seam serves it — the sphere renders this JSON
- * whether it came over TLS from a peer or from right here.
- */
-public func worldviewJson(dataDir: String) -> String {
-    return try!  FfiConverterString.lift(try! rustCall() {
-    uniffi_familiar_core_fn_func_worldview_json(
-        FfiConverterString.lower(dataDir),$0
     )
 })
 }
@@ -579,31 +465,7 @@ private var initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
-    if (uniffi_familiar_core_checksum_func_answer() != 51361) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_familiar_core_checksum_func_found() != 54642) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_familiar_core_checksum_func_invite_payload() != 16138) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_familiar_core_checksum_func_is_founded() != 19891) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_familiar_core_checksum_func_join() != 35570) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_familiar_core_checksum_func_mesh_start() != 49686) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_familiar_core_checksum_func_mesh_stop() != 19349) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_familiar_core_checksum_func_whisker_advise() != 30991) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_familiar_core_checksum_func_worldview_json() != 4366) {
+    if (uniffi_familiar_core_checksum_func_whisker_advise() != 45747) {
         return InitializationResult.apiChecksumMismatch
     }
 

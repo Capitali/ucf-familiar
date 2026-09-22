@@ -1,8 +1,11 @@
 # ucf-familiar — a ship's computer for the United Cat Foods exchange.
 #
-# Six crates and two binaries: `whisker`, the pilot that flies one hull from that
+# Seven crates and two binaries: `whisker`, the pilot that flies one hull from that
 # hull's own store, and `ucf-familiar`, the fleet CLI that commissions ships, leases
 # them their authority, supervises their pilots and serves a feed for a companion app.
+# The seventh crate, `core-ffi`, is not part of either: it is the pilot's doctrine
+# packaged for an Apple shell (one function, `whiskerAdvise`), built by
+# `tools/build-core.sh`.
 #
 # There is no background service, no database and no cloud account. The ship talks to
 # the exchange over HTTP and otherwise reads and writes plain files in its own store:
@@ -19,6 +22,7 @@ members = [
     "crates/world",
     "crates/pilot",
     "crates/cli",
+    "crates/core-ffi",
 ]
 
 [workspace.package]

@@ -1,8 +1,9 @@
 # Architecture
 
-A Rust workspace of six crates producing two binaries: `whisker`, the pilot that flies one
+A Rust workspace of seven crates producing two binaries: `whisker`, the pilot that flies one
 hull, and `ucf-familiar`, the fleet CLI that commissions ships, leases them their authority,
-supervises their pilots, and serves a read/write feed for a companion app.
+supervises their pilots, and serves a read/write feed for a companion app. The seventh crate
+produces no binary: it packages the doctrine for the iOS app.
 
 Dependencies are deliberately few: `serde`/`serde_json` everywhere, `rustls` in the wire,
 and `ed25519-dalek`/`sha2`/`getrandom` in the one crate that signs. There is no async
@@ -17,6 +18,7 @@ runtime, no HTTP framework, no database, and no argument-parsing crate.
 | `ucf-node` | — | The ed25519 keypair a node is known by, its short fingerprint (`SHA-256(pubkey)[..8]`, hex), and signature verification. The fleet signs leases with its key; each ship mints its own. |
 | `ucf-world` | — | The partition. `instance` (the provisioning record for a commissioned ship), `bridge` (typed envelopes and payload-free receipts), `lease` (the signed, expiring projection of the human-owned boundary). |
 | `ucf-pilot` | `whisker` | The doctrine, pure, plus the runner. `doctrine` (freight, fuel, repair, the tour), `trade` (the merchant), `outfit` (fittings, debt, frames), `chain` (supply-chain arithmetic and the dispatch deck), `autonomy` (the dial), `wire` (JSON in, decision out), `store` (every file the runner touches), and `main.rs` (the fold loop). |
+| `ucf-core-ffi` | — | The doctrine for an Apple shell. A UniFFI staticlib (`familiar_core`) exporting exactly one function, `whiskerAdvise(inputJson:)`, over `ucf_pilot::wire::advise`. It holds no state, opens no socket and reads no file, so the phone asks a pure question and never becomes a peer holding ship authority. Built by `tools/build-core.sh`. |
 | `ucf-cli` | `ucf-familiar` | The captain's side: `fleet` (pair, status, run, rename, orders, economy, names), `autonomy` (show, set, advice, approve, deny), `world` (commission, lease, rename, decommission), and `fleet serve` (the feed). |
 
 The decision crates own no file, socket or clock: facts in, a decision out. That is what lets
@@ -138,6 +140,17 @@ A companion app can reach a fleet two ways:
    bumped whenever a new input fact becomes load-bearing, so a client built against one seam
    can tell it has been handed another. Shared fixtures under
    `crates/pilot/tests/fixtures/contract/` are pinned on both sides.
+
+   The shim is `crates/core-ffi`, and `tools/build-core.sh` turns it into
+   `ios/FamiliarCore/`: the generated `Generated/familiar_core.swift` the app compiles and
+   the `FamiliarCore.xcframework` it links (device + arm64 simulator, min iOS 26.0, DWARF
+   stripped). **Both are committed**, because the thing worth pinning is the archive the app
+   actually ships: `ios/UCFFamiliarTests/CorePinTests.swift` runs the CHECKED-IN archive over
+   the same two contract fixtures the Rust seam tests read from source, and catches the case
+   where both suites are green while the shipped binary disagrees. So re-run
+   `tools/build-core.sh` and commit its output whenever doctrine changes — a stale archive is
+   exactly the defect that test exists to name. (The pin needs an arm64 simulator, i.e. an
+   Apple Silicon Mac; the slice is arm64-only.)
 2. **Through the host feed.** `ucf-familiar fleet serve` exposes the ship stores over plain
    HTTP/1.1 with a bearer from `fleet-serve.token` (minted 0600 on first run): one thread per
    connection, a 64 KiB request cap, no TLS — bind it to loopback or a private network
