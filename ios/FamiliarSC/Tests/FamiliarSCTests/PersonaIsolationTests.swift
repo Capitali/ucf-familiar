@@ -5,7 +5,7 @@ import XCTest
 /// The Swift half of persona isolation: a broken persona is BROKEN in the fleet row, never
 /// "unnamed"; and while a ship is being opened — or after that open fails — nothing of the
 /// previous captain is readable or speakable under the new world.
-final class T236SwiftTests: XCTestCase {
+final class PersonaIsolationTests: XCTestCase {
     func testABrokenPersonaOnTheShipsRowIsSaidAsBrokenNotUnnamed() throws {
         func row(_ persona: String) throws -> ShipSummary {
             let text = #"{"world":"w","label":"KK II","hull":"","captain":"Luke","server":"","automations":[],"persona":"# + persona + "}"

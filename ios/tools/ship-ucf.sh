@@ -7,8 +7,11 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 IOS="$REPO/ios"
 BUILD="${1:?usage: ship-ucf.sh <build-number>}"
-ASC_KEY_ID="${ASC_KEY_ID:-SUZJSXVS25}"
-ASC_ISSUER_ID="${ASC_ISSUER_ID:-69a6de82-89e3-47e3-e053-5b8c7c11a4d1}"
+# App Store Connect API credentials. No defaults: these identify a developer
+# account, and this repository is public. Export them (or put them in a file
+# this script is sourced with) before shipping.
+ASC_KEY_ID="${ASC_KEY_ID:?set ASC_KEY_ID to your App Store Connect API key id}"
+ASC_ISSUER_ID="${ASC_ISSUER_ID:?set ASC_ISSUER_ID to your App Store Connect issuer id}"
 ASC_KEY_PATH="${ASC_KEY_PATH:-$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8}"
 [ -f "$ASC_KEY_PATH" ] || { echo "ASC key not found at $ASC_KEY_PATH"; exit 1; }
 cd "$IOS"
@@ -30,8 +33,8 @@ git diff --cached --quiet || git commit -m "UCF Familiar build $BUILD
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 # Rebase before pushing: a rejected push under `set -e` kills the ship between
 # claiming the build number in git and building anything, leaving the number
-# burned and nothing on TestFlight. Two Macs
-# and several sessions land on this repo now; a racing push is the normal case.
+# burned and nothing on TestFlight. Several machines
+# and sessions can land on this repo; a racing push is the normal case.
 git pull --rebase --autostash --quiet origin "$(git branch --show-current)"
 git push origin "$(git branch --show-current)" 2>&1 | tail -1
 cd "$IOS"

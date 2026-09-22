@@ -6,7 +6,7 @@ import XCTest
 /// for every hull; the conversation answers with the order read back, never status; the
 /// routes are the host's; a question is still a question.
 final class OrdersTests: XCTestCase {
-    func testIansSentenceIsATravelAndAHoldForTheFleet() throws {
+    func testTheCaptainsSentenceIsATravelAndAHoldForTheFleet() throws {
         let orders = try XCTUnwrap(OrderParser.parse("Felix, bring all the ships to paws truck stop. Wait there for my next instruction."))
         XCTAssertEqual(orders.map(\.verb), [.travel, .hold])
         XCTAssertEqual(orders.map(\.scope), [.fleet, .fleet])

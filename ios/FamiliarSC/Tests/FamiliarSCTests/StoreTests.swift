@@ -41,11 +41,11 @@ final class StoreTests: XCTestCase {
         XCTAssertThrowsError(try Persona.decode(Data(#"{"persona_version":1,"name":"Felix","pronouns":{"label":"he/him","subject":"he"}}"#.utf8)))
     }
 
-    func testAShipPairedBeforeT236HasNoPersonaAndSaysSo() throws {
+    func testAShipPairedBeforePersonasExistedHasNoneAndSaysSo() throws {
         let s = try Fixtures.scratchStore { try FileManager.default.removeItem(at: $0.appendingPathComponent("persona.json")) }
         XCTAssertNil(try s.persona())
         XCTAssertEqual(s.computerName(), "(unnamed — `fleet rename` her)")
-        XCTAssertNotEqual(s.computerName(), Persona.householdDefaultName, "a ship never borrows the loader's fallback name")
+        XCTAssertNotEqual(s.computerName(), Persona.fallbackName, "a ship never borrows the loader's fallback name")
     }
 
     func testPersonaRefusalsMirrorTheRustLoader() {

@@ -109,7 +109,7 @@ public struct SpokenOf: Equatable, Sendable {
         if let p = pronouns, p.label != "none", !p.subject.isEmpty, !p.object.isEmpty, !p.possessive.isEmpty {
             return SpokenOf(subject: p.subject, object: p.object, possessive: p.possessive)
         }
-        if let n = name?.trimmingCharacters(in: .whitespaces), !n.isEmpty, n != Persona.rootName, n != Persona.householdDefaultName {
+        if let n = name?.trimmingCharacters(in: .whitespaces), !n.isEmpty, n != Persona.rootName, n != Persona.fallbackName {
             return SpokenOf(subject: n, object: n, possessive: n + "\u{2019}s")
         }
         return SpokenOf(subject: "it", object: "it", possessive: "its")
@@ -121,7 +121,7 @@ public struct SpokenOf: Equatable, Sendable {
 /// build does not know must be heard about, not half-honoured.
 public struct Persona: Codable, Equatable, Sendable {
     public var personaVersion: Int = 1
-    public var name: String = Persona.householdDefaultName
+    public var name: String = Persona.fallbackName
     public var role: String = ""
     public var register: String = ""
     public var world: String = ""
@@ -133,7 +133,7 @@ public struct Persona: Codable, Equatable, Sendable {
     public static let rootName = "Purr"
     /// The loader's fallback name, which a ship must never borrow: a ship that has not been
     /// named says so rather than answering to a default.
-    public static let householdDefaultName = "the familiar"
+    public static let fallbackName = "the familiar"
     static let knownKeys: Set<String> = ["persona_version", "name", "role", "register", "world", "style", "pronouns"]
     static let knownStyleKeys: Set<String> = ["warmth", "formality", "humor", "sentence_length", "contractions", "vocabulary", "greeting", "form_of_address"]
 
@@ -151,7 +151,7 @@ public struct Persona: Codable, Equatable, Sendable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         personaVersion = try c.decodeIfPresent(Int.self, forKey: .personaVersion) ?? 1
-        name = try c.decodeIfPresent(String.self, forKey: .name) ?? Persona.householdDefaultName
+        name = try c.decodeIfPresent(String.self, forKey: .name) ?? Persona.fallbackName
         role = try c.decodeIfPresent(String.self, forKey: .role) ?? ""
         register = try c.decodeIfPresent(String.self, forKey: .register) ?? ""
         world = try c.decodeIfPresent(String.self, forKey: .world) ?? ""
