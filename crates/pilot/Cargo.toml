@@ -1,0 +1,22 @@
+[package]
+name = "ucf-pilot"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "whisker — the ship world's pilot: flies a UCF hull from the ship's own store, under the fleet's lease. A cat judges every clearance by its whiskers."
+
+[lib]
+name = "ucf_pilot"
+path = "src/lib.rs"
+
+# The pilot's binary is `whisker`: `ucf-familiar fleet run` spawns it by that name.
+[[bin]]
+name = "whisker"
+path = "src/main.rs"
+
+[dependencies]
+ucf-wire.workspace = true
+ucf-node.workspace = true
+ucf-world.workspace = true
+serde.workspace = true
+serde_json.workspace = true

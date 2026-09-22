@@ -1,0 +1,2033 @@
+//! `ucf-familiar fleet serve` — the captain's bridge feed: the ship stores, served to the
+//! companion app over HTTP with a bearer, from the Mac the pilots run on. An app's
+//! ships-feed and captain-acts protocols are the other end; the shapes here are the
+//! contract those two sides agreed on 2026-09-04.
+//!
+//! Reads: `GET /ships`, `GET /ships/{world}/journal?since=N`,
+//! `GET /ships/{world}/proposals`, `GET /ships/{world}/dial`, `GET /ships/{world}/book`
+//! (holdings + deliveries), `GET /ships/{world}/fuel` (the fuel conversation's facts),
+//! `GET /ships/{world}/brief`, `GET /captains/{slug}/brief` and `GET /brief` (one call for
+//! whichever context is on screen). Writes:
+//! `POST /ships/{world}/approve {id, approved}`, `PUT /ships/{world}/dial {…}`,
+//! `PUT /ships/{world}/automations {automations: […]}`, `POST /ships/{world}/rename {name}`,
+//! `PUT /ships/{world}/captain {captain}`,
+//! `POST /pair {label, captain, server, key, automations, pilot_args?}`,
+//! `POST /unpair {world}`. Every reply carries `tick` and `tick_seconds` from the
+//! exchange so the app settles proposal lapse exactly as whisker does. The bearer is
+//! `fleet-serve.token` in the data dir (minted 0600 on first run). A plain, bounded
+//! HTTP/1.1 server on std: one thread per connection, 64 KiB request cap, no TLS —
+//! bind it to loopback or a private network address, never the open internet.
+
+use std::collections::BTreeMap;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::Path;
+use std::process::ExitCode;
+use std::time::Duration;
+
+use serde_json::{json, Value};
+use ucf_pilot::autonomy::{Approval, Dial, Level, Surface};
+
+use super::fleet::{
+    aboard, computer_state, delivery_totals, estimate_calibration, journal_fills,
+    last_journal_line, lease_expiry, paired_ships, persona_for, pid_alive, read_env_value,
+    trade_book, wire_get, Ship,
+};
+
+const MAX_REQUEST: usize = 64 * 1024;
+
+/// ℳ per unit of fuel (the content pack's `fuelPricePerUnit`; 2 on LOCAL and PROD).
+const FUEL_PRICE_PER_UNIT: i64 = 2;
+
+fn token(dir: &Path) -> std::io::Result<String> {
+    let path = dir.join("fleet-serve.token");
+    if let Ok(t) = std::fs::read_to_string(&path) {
+        let t = t.trim().to_string();
+        if t.len() >= 32 {
+            return Ok(t);
+        }
+    }
+    let mut bytes = [0u8; 24];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    let t: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    std::fs::write(&path, &t)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(t)
+}
+
+struct Req {
+    method: String,
+    path: String,
+    query: BTreeMap<String, String>,
+    bearer: Option<String>,
+    body: Vec<u8>,
+}
+
+fn read_request(stream: &mut TcpStream) -> Option<Req> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .ok()?;
+    let mut buf = Vec::with_capacity(4096);
+    let mut tmp = [0u8; 4096];
+    let header_end;
+    loop {
+        let n = stream.read(&mut tmp).ok()?;
+        if n == 0 {
+            return None;
+        }
+        buf.extend_from_slice(&tmp[..n]);
+        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            header_end = i + 4;
+            break;
+        }
+        if buf.len() > MAX_REQUEST {
+            return None;
+        }
+    }
+    let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+    let mut lines = head.split("\r\n");
+    let start = lines.next()?;
+    let mut parts = start.split_whitespace();
+    let method = parts.next()?.to_string();
+    let target = parts.next()?.to_string();
+    let mut bearer = None;
+    let mut content_length = 0usize;
+    for l in lines {
+        if let Some((k, v)) = l.split_once(':') {
+            let k = k.trim().to_ascii_lowercase();
+            let v = v.trim();
+            if k == "authorization" {
+                bearer = v.strip_prefix("Bearer ").map(|s| s.trim().to_string());
+            } else if k == "content-length" {
+                content_length = v.parse().unwrap_or(0);
+            }
+        }
+    }
+    if content_length > MAX_REQUEST {
+        return None;
+    }
+    let mut body = buf[header_end..].to_vec();
+    while body.len() < content_length {
+        let n = stream.read(&mut tmp).ok()?;
+        if n == 0 {
+            break;
+        }
+        body.extend_from_slice(&tmp[..n]);
+    }
+    body.truncate(content_length);
+    let (path, q) = target.split_once('?').unwrap_or((&target, ""));
+    let query = q
+        .split('&')
+        .filter_map(|kv| kv.split_once('='))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    Some(Req {
+        method,
+        path: path.to_string(),
+        query,
+        bearer,
+        body,
+    })
+}
+
+fn respond(stream: &mut TcpStream, status: u16, body: &Value) {
+    let text = body.to_string();
+    let reason = match status {
+        200 => "OK",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        _ => "Error",
+    };
+    let _ = write!(
+        stream,
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        text.len(),
+        text
+    );
+    let _ = stream.flush();
+}
+
+/// An exchange's clock, remembered 30 s, keyed by the exchange — two ships on two
+/// worlds (KK II on PROD, the soak ship on LOCAL) run on two clocks.
+struct Clock {
+    tick: i64,
+    tick_seconds: i64,
+    at: i64,
+}
+
+type Clocks = BTreeMap<String, Clock>;
+
+fn clock(ship: &Ship, cache: &mut Clocks) -> (i64, i64) {
+    let now = super::now_secs();
+    let key = read_env_value(&ship.dir.join("ucf.env"), "UCF_KEY").unwrap_or_default();
+    let server = read_env_value(&ship.dir.join("ucf.env"), "UCF_SERVER")
+        .unwrap_or_else(|| ship.captain.server.clone());
+    if let Some(c) = cache.get(&server) {
+        if now - c.at < 30 {
+            return (c.tick, c.tick_seconds);
+        }
+    }
+    if let Ok(v) = wire_get(&server, &key, "/v1/status") {
+        let tick = v.get("tick").and_then(Value::as_i64).unwrap_or(0);
+        let tick_seconds = v
+            .get("tickDurationSec")
+            .and_then(Value::as_i64)
+            .unwrap_or(180);
+        cache.insert(
+            server,
+            Clock {
+                tick,
+                tick_seconds,
+                at: now,
+            },
+        );
+        return (tick, tick_seconds);
+    }
+    cache
+        .get(&server)
+        .map(|c| (c.tick, c.tick_seconds))
+        .unwrap_or((0, 180))
+}
+
+/// One ship's status row — the same facts `fleet status --json` prints.
+/// The ledger rows that are one captain's: their captain and computer names, and the
+/// hull names of the ships they fly.
+fn names_for(root: &Path, captain_id: &str, mine: &[&Ship]) -> Vec<Value> {
+    super::fleet::names(root)
+        .into_iter()
+        .filter(|e| match e.kind.as_str() {
+            "captain" | "computer" => !captain_id.is_empty() && e.holder == captain_id,
+            "hull" => mine.iter().any(|s| s.world.id == e.holder),
+            _ => false,
+        })
+        .map(|e| serde_json::to_value(e).unwrap_or(Value::Null))
+        .collect()
+}
+
+fn ship_row(s: &Ship, root: &Path, now: i64) -> Value {
+    let key = read_env_value(&s.dir.join("ucf.env"), "UCF_KEY").unwrap_or_default();
+    let server = read_env_value(&s.dir.join("ucf.env"), "UCF_SERVER")
+        .unwrap_or_else(|| s.captain.server.clone());
+    let me = wire_get(&server, &key, "/v1/me").ok();
+    let g = |k: &str| {
+        me.as_ref()
+            .and_then(|m| m.get(k).cloned())
+            .unwrap_or(Value::Null)
+    };
+    let (hauls, paid) = delivery_totals(&s.dir);
+    let (aboard_units, aboard_cost) = aboard(&s.dir);
+    let (closed_positions, expected, est_realized) = estimate_calibration(&s.dir);
+    let mut fills: Vec<Value> = journal_fills(&s.dir)
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if let Ok(Value::Array(rows)) = wire_get(&server, &key, "/v1/receipts") {
+        for r in rows {
+            let dup = fills.iter().any(|f| {
+                f["good"] == r["good"]
+                    && f["side"] == r["side"]
+                    && f["units"] == r["units"]
+                    && (f["tick"].as_i64().unwrap_or(0) - r["tick"].as_i64().unwrap_or(0)).abs()
+                        <= 3
+            });
+            if !dup {
+                fills.push(r);
+            }
+        }
+    }
+    let book = trade_book(&Value::Array(fills));
+    let last = last_journal_line(&s.dir);
+    let dial = ucf_pilot::store::load_dial(&s.dir);
+    let open_proposals = {
+        let approvals = ucf_pilot::store::load_approvals(&s.dir);
+        ucf_pilot::store::load_proposals(&s.dir)
+            .iter()
+            .filter(|p| !approvals.iter().any(|a| a.id == p.id))
+            .count()
+    };
+    // The captain's standing orders, counted; the list is at /ships/{id}/orders.
+    let orders_count = {
+        let all = ucf_pilot::store::load_orders(&s.dir);
+        json!({"pending": all.iter().filter(|o| o.pending() && o.waits.is_none()).count(),
+               "waiting": all.iter().filter(|o| o.pending() && o.waits.is_some()).count()})
+    };
+    json!({
+        "world": s.world.id, "label": s.world.label, "captain": s.captain.captain,
+        // Identity, and the route built HERE. A client that assembles a brief path
+        // from a display name is reproducing a filesystem transform it cannot see,
+        // which is how the LOCAL bridge came to 404 on a captain that exists
+        // (a design review finding). `captain` stays a label.
+        "captain_id": s.captain.captain_id,
+        // The WORLD's captain record (metal#86), as `/v1/me` carries it: the id the
+        // exchange keys on, the captain's name, the computer's name and lineage. Null
+        // until the exchange has filed this captain. `exchange_captain_id` is the
+        // same id as the record remembers it.
+        "captain_record": g("captain"),
+        "exchange_captain_id": s.captain.exchange_captain_id,
+        "captain_brief": format!("/captains/{}/brief", if s.captain.captain_id.trim().is_empty() {
+            super::fleet::captain_store(root, &s.captain.captain)
+                .file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()
+        } else {
+            s.captain.captain_id.clone()
+        }),
+        "key_id": s.captain.key_id, "server": server,
+        "automations": std::fs::read_to_string(s.dir.join("automations.json")).ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok()).unwrap_or(Value::Null),
+        "pilot_pid": pid_alive(&s.dir),
+        "lease_expires_at": lease_expiry(&s.dir),
+        "lease_expires_in_h": lease_expiry(&s.dir).map(|x| (x - now) / 3600),
+        "ship": g("shipName"), "docked": g("docked"), "route": g("route"),
+        // The world's OWN word for itself (PROD / LOCAL / TEST) — an instance name,
+        // never part of a ship's name (decided 2026-09-04).
+        "world_name": wire_get(&server, &key, "/v1/status")
+            .ok()
+            .and_then(|v| v.get("worldName").and_then(Value::as_str).map(String::from)),
+        "credits": g("credits"), "debt": g("debt"), "fuel": g("fuel"), "fuelCapacity": g("fuelCapacity"),
+        "wearBps": g("wearBps"), "fittings": g("fittings"), "titled": g("titled"),
+        "holdUsed": g("holdUsed"), "holdCapacity": g("holdCapacity"), "cargo": g("cargo"),
+        // The bay: every contract the hull holds, `{load, word}` off
+        // `/v1/me.contracts[]` — the host twin of the bridge's "Your contracts · N"
+        // (handed over 2026-09-17). `word` is the doctrine's: booked,
+        // pickedUp, delivered.
+        "contracts": me.as_ref()
+            .and_then(|m| m.get("contracts").and_then(Value::as_array))
+            .map(|cs| cs.iter().filter_map(|c| {
+                let load = c.get("loadId")?.as_str()?;
+                let word = match c.get("status").and_then(Value::as_str).unwrap_or("") {
+                    "delivered" => "delivered",
+                    "inTransit" | "loaded" | "pickedUp" => "pickedUp",
+                    _ => "booked",
+                };
+                Some(json!({"load": load, "word": word,
+                            "units": c.get("unitsInHold").cloned().unwrap_or(Value::Null),
+                            "payable": c.get("payableToBooker").cloned().unwrap_or(Value::Null)}))
+            }).collect::<Vec<_>>())
+            .unwrap_or_default(),
+        "hauls": hauls, "freight_paid": paid,
+        "trades": {"filled": book.filled, "rejected": book.rejected, "realized": book.realized,
+                   "cost_of_sold": book.cost_of_sold, "inventory_cost": aboard_cost,
+                   "inventory": aboard_units,
+                   "unmatched_units": book.unmatched_units,
+                   "unmatched_proceeds": book.unmatched_proceeds,
+                   "quoted_basis_lots": book.quoted_basis_lots,
+                   "closed_positions": closed_positions,
+                   "expected_margin": expected,
+                   "realized_on_closed": est_realized},
+        "dial": dial.settings,
+        "open_proposals": open_proposals,
+        // The captain's standing orders, counted; the list is at /ships/{id}/orders.
+        "orders": orders_count,
+        // The CAPTAIN's computer (the owner's ruling, 2026-09-04): one persona across
+        // their whole fleet, with a ship-local record as the fallback. The record
+        // rides whole, `pronouns` included: the app's reader has carried the field
+        // since build 8 (2026-09-17), so the strip that kept build 7's strict reader
+        // from locking every automation is gone.
+        "persona": persona_for(root, &s.dir, &s.captain).unwrap_or(Value::Null),
+        // The same computer as a TYPED state — named / broken / absent — so a client
+        // never has to read "no name" as "unnamed" (round 2, finding 7).
+        "computer_state": computer_state(root, &s.dir, &s.captain),
+        "last_event": last.as_ref().and_then(|v| v.get("event").cloned()).unwrap_or(Value::Null),
+        "last_at": last.as_ref().and_then(|v| v.get("at").cloned()).unwrap_or(Value::Null),
+        "reachable": me.is_some(),
+    })
+}
+
+fn proposals_with_state(ship_dir: &Path, tick: i64) -> Vec<Value> {
+    let approvals = ucf_pilot::store::load_approvals(ship_dir);
+    ucf_pilot::store::load_proposals(ship_dir)
+        .into_iter()
+        .map(|p| {
+            let answer = approvals.iter().rev().find(|a| a.id == p.id);
+            let state = match answer {
+                Some(a) if a.approved => "approved",
+                Some(_) => "denied",
+                None if tick > p.expires_tick => "lapsed",
+                None => "open",
+            };
+            let mut v = serde_json::to_value(&p).unwrap_or(Value::Null);
+            v["state"] = json!(state);
+            v["answered_at"] = answer.map(|a| json!(a.at)).unwrap_or(Value::Null);
+            v
+        })
+        .collect()
+}
+
+/// Place one order on one hull from a request body: the verbs a captain can give
+/// (`repair` | `refuel` | `payLease` | `travel` | `hold`), the station resolved
+/// against the exchange's own register where a course names one, and a course
+/// order superseding the course before it (`store::place_order`).
+fn place_order(s: &Ship, b: &Value, now: i64) -> Result<ucf_pilot::store::Order, (u16, String)> {
+    let verb = b
+        .get("verb")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if ![
+        "repair", "refuel", "payLease", "paws", "travel", "hold", "resume",
+    ]
+    .contains(&verb.as_str())
+    {
+        return Err((
+            400,
+            "verb is repair, refuel, payLease, paws, travel, hold or resume".into(),
+        ));
+    }
+    let when = b
+        .get("when")
+        .and_then(Value::as_str)
+        .unwrap_or(
+            if ["travel", "hold", "paws", "resume"].contains(&verb.as_str()) {
+                "now"
+            } else {
+                "next-docking"
+            },
+        )
+        .to_string();
+    if !["next-docking", "now"].contains(&when.as_str()) {
+        return Err((400, "when is next-docking or now".into()));
+    }
+    let amount = b.get("amount").and_then(Value::as_i64);
+    if verb == "payLease" && amount.unwrap_or(0) <= 0 {
+        return Err((400, "payLease needs amount".into()));
+    }
+    let station = match (verb.as_str(), b.get("station").and_then(Value::as_str)) {
+        ("travel", None) | ("travel", Some("")) => {
+            return Err((400, "travel needs a station".into()))
+        }
+        ("travel", Some(name)) | ("hold", Some(name)) if !name.trim().is_empty() => {
+            Some(resolve_station(s, name).map_err(|why| (400, why))?)
+        }
+        _ => None,
+    };
+    let orders = ucf_pilot::store::load_orders(&s.dir);
+    // "Resume" / "as you were": the standing course ends and the doctrine flies again.
+    // Recorded as an order already done, so the list says who ended it and when.
+    let resume = verb == "resume";
+    let order = ucf_pilot::store::Order {
+        id: format!("ord-{}-{}", now, orders.len() + 1),
+        verb,
+        station,
+        when,
+        amount,
+        by: b
+            .get("by")
+            .and_then(Value::as_str)
+            .map(String::from)
+            .unwrap_or_else(|| s.captain.captain.clone()),
+        at: now,
+        done_at: if resume { Some(now) } else { None },
+        waits: None,
+    };
+    let orders = if resume {
+        ucf_pilot::store::resume(orders, order.clone(), now)
+    } else {
+        ucf_pilot::store::place_order(orders, order.clone(), now)
+    };
+    ucf_pilot::store::save_orders(&s.dir, &orders).map_err(|e| (500, e.to_string()))?;
+    Ok(order)
+}
+
+/// The exchange's own id for a station the captain named — "paws truck stop" is
+/// `paws-truckstop`. Exact id first; then the name folded the way the exchange
+/// folds ids (lowercase, runs of anything but letters and digits → one dash, and
+/// the same fold with the dashes dropped, so "truck stop" meets "truckstop");
+/// then the register itself where the hull's key can read it (`/v1/stations`, ids
+/// and display names). A register that cannot be read accepts the folded name
+/// and lets the exchange judge it — the refusal then lands on the order, named.
+fn resolve_station(s: &Ship, name: &str) -> Result<String, String> {
+    let fold = |t: &str| -> String {
+        let mut out = String::new();
+        let mut dash = false;
+        for c in t.trim().to_lowercase().chars() {
+            if c.is_ascii_alphanumeric() {
+                out.push(c);
+                dash = false;
+            } else if !dash && !out.is_empty() {
+                out.push('-');
+                dash = true;
+            }
+        }
+        out.trim_end_matches('-').to_string()
+    };
+    let wanted = fold(name);
+    if wanted.is_empty() {
+        return Err("a station needs a name".into());
+    }
+    let tight = wanted.replace('-', "");
+    let key = read_env_value(&s.dir.join("ucf.env"), "UCF_KEY").unwrap_or_default();
+    let server = read_env_value(&s.dir.join("ucf.env"), "UCF_SERVER")
+        .unwrap_or_else(|| s.captain.server.clone());
+    let Ok(register) = wire_get(&server, &key, "/v1/stations") else {
+        return Ok(wanted);
+    };
+    let rows: Vec<&Value> = register
+        .as_array()
+        .map(|a| a.iter().collect())
+        .or_else(|| {
+            register
+                .get("stations")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().collect())
+        })
+        .unwrap_or_default();
+    if rows.is_empty() {
+        return Ok(wanted);
+    }
+    let id_of = |r: &Value| r.get("id").and_then(Value::as_str).map(String::from);
+    let name_of = |r: &Value| {
+        r.get("name")
+            .or_else(|| r.get("displayName"))
+            .and_then(Value::as_str)
+            .map(String::from)
+    };
+    for r in &rows {
+        if let Some(id) = id_of(r) {
+            if id == wanted || fold(&id) == wanted || fold(&id).replace('-', "") == tight {
+                return Ok(id);
+            }
+            if let Some(n) = name_of(r) {
+                if fold(&n) == wanted || fold(&n).replace('-', "") == tight {
+                    return Ok(id);
+                }
+            }
+        }
+    }
+    let first = wanted.split('-').next().unwrap_or("").to_string();
+    let near: Vec<String> = rows
+        .iter()
+        .filter_map(|r| id_of(r))
+        .filter(|id| !first.is_empty() && id.contains(&first))
+        .take(5)
+        .collect();
+    Err(if near.is_empty() {
+        format!("no station named \"{name}\" on this exchange")
+    } else {
+        format!(
+            "no station named \"{name}\" on this exchange — did you mean {}?",
+            near.join(", ")
+        )
+    })
+}
+
+fn handle(req: Req, dir: &Path, root: &Path, tok: &str, clk: &mut Clocks) -> (u16, Value) {
+    if req.bearer.as_deref() != Some(tok) {
+        return (401, json!({"error": "bearer"}));
+    }
+    let ships = paired_ships(dir, root);
+    let now = super::now_secs();
+    let segs: Vec<&str> = req.path.trim_matches('/').split('/').collect();
+    let find = |id: &str| ships.iter().find(|s| s.world.id == id);
+    // Per-ship routes carry that ship's clock at the top level; the fleet list
+    // carries each ship's clock on its row.
+    let (tick, tick_seconds) = match segs.as_slice() {
+        ["ships", id, ..] => find(id).map(|s| clock(s, clk)).unwrap_or((0, 180)),
+        _ => (0, 180),
+    };
+    match (req.method.as_str(), segs.as_slice()) {
+        ("GET", ["brief"]) => {
+            // The fleet in one call, for a captain looking at the whole list.
+            // Grouped by IDENTITY (round 2, finding 4); the display name rides on the entry.
+            let mut per_captain: BTreeMap<String, (String, Vec<Value>)> = BTreeMap::new();
+            for s in &ships {
+                let (t, ts) = clock(s, clk);
+                let open = proposals_with_state(&s.dir, t)
+                    .into_iter()
+                    .filter(|p| p["state"] == "open")
+                    .count();
+                let mut row = ship_row(s, root, now);
+                row["tick"] = json!(t);
+                row["tick_seconds"] = json!(ts);
+                row["open_proposals"] = json!(open);
+                let key = if s.captain.captain_id.trim().is_empty() {
+                    format!(
+                        "slug:{}",
+                        super::fleet::captain_store(root, &s.captain.captain).display()
+                    )
+                } else {
+                    s.captain.captain_id.clone()
+                };
+                let e = per_captain.entry(key).or_default();
+                e.0 = s.captain.captain.clone();
+                e.1.push(row);
+            }
+            (
+                200,
+                json!({
+                    "context": {"kind": "fleet", "captains": per_captain.values().map(|(c, _)| c).collect::<Vec<_>>()},
+                    "captains": per_captain.iter().map(|(id, (c, rows))| json!({
+                        "captain": c,
+                        "captain_id": if id.starts_with("slug:") { Value::Null } else { json!(id) },
+                        "computer_state": rows.first().map(|r| r["computer_state"].clone()).unwrap_or(json!({"state": "absent"})),
+                        // Name, or the reason there is none — never silence, which
+                        // reads as "unnamed" and invites a rename over a file that
+                        // already has a name in it (finding 7).
+                        "computer": rows.first().and_then(|r| r["persona"]["name"].as_str())
+                            .map(String::from)
+                            .or_else(|| rows.first()
+                                .and_then(|r| r["persona"]["error"].as_str())
+                                .map(|e| format!("(will not load: {e})"))),
+                        "ships": rows,
+                        "pooled_credits": rows.iter().filter_map(|r| r["credits"].as_i64()).sum::<i64>(),
+                        "open_proposals": rows.iter().filter_map(|r| r["open_proposals"].as_i64()).sum::<i64>(),
+                    })).collect::<Vec<_>>(),
+                }),
+            )
+        }
+        // A captain's own frame: who they are, whose computer flies for them, their
+        // hulls and their one book. The same `context` shape as a ship's brief, so a
+        // client can put a captain on screen and the conversation follows.
+        // Everything the fleet has ever called anyone, oldest first (2026-09-08:
+        // "We remember names… We do not forget names.").
+        ("GET", ["names"]) => (
+            200,
+            json!({"names": super::fleet::names(root), "tick": tick, "tick_seconds": tick_seconds}),
+        ),
+        // The captain's money over time: readings, attributed flows, a summary and
+        // the host's analysis, pooled across every hull they fly (asked for
+        // 2026-09-09). `?window=24h|7d|30d`, a week by default.
+        ("GET", ["captains", slug, "economy"]) => {
+            let mine: Vec<&Ship> = ships
+                .iter()
+                .filter(|s| {
+                    !s.captain.captain_id.trim().is_empty() && s.captain.captain_id == *slug
+                })
+                .collect();
+            let Some(first) = mine.first() else {
+                return (
+                    404,
+                    json!({"error": "no captain by that identity flies here"}),
+                );
+            };
+            let since =
+                now - super::economy::window_seconds(req.query.get("window").map(String::as_str));
+            // The exchange's own cash ledger where it answers (ucf-exchange#42): the
+            // fold's word on every credit that moved, in place of the journal's guess.
+            let per_hull: Vec<super::economy::History> = mine
+                .iter()
+                .map(|s| {
+                    let key = read_env_value(&s.dir.join("ucf.env"), "UCF_KEY").unwrap_or_default();
+                    let server = read_env_value(&s.dir.join("ucf.env"), "UCF_SERVER")
+                        .unwrap_or_else(|| s.captain.server.clone());
+                    let cash = wire_get(&server, &key, "/v1/cash").ok();
+                    super::economy::for_ship_with_cash(&s.dir, since, cash.as_ref())
+                })
+                .collect();
+            let pooled = super::economy::pool(&per_hull, since);
+            (
+                200,
+                json!({
+                    "captain": first.captain.captain, "captain_id": first.captain.captain_id,
+                    "since": since, "now": now,
+                    "hulls": mine.iter().zip(&per_hull).map(|(s, h)| {
+                        let mut v = super::economy::to_json(h, true);
+                        v["world"] = json!(s.world.id);
+                        v["label"] = json!(s.world.label);
+                        v
+                    }).collect::<Vec<_>>(),
+                    "pooled": super::economy::to_json(&pooled, true),
+                }),
+            )
+        }
+        ("GET", ["captains", slug, "brief"]) => {
+            // Match on IDENTITY first — that is what `captain_brief` hands out. The
+            // legacy slug still resolves so a client built before ids, or a store
+            // that has not been migrated yet, keeps working; it is a fallback, never
+            // the key. Two captains whose names slug alike used to land here as one
+            // captain, and this route summed their money (finding 4).
+            let mine: Vec<&Ship> = ships
+                .iter()
+                .filter(|s| {
+                    if !s.captain.captain_id.trim().is_empty() {
+                        return s.captain.captain_id == *slug;
+                    }
+                    super::fleet::captain_store(root, &s.captain.captain)
+                        .file_name()
+                        .map(|f| f.to_string_lossy() == *slug)
+                        .unwrap_or(false)
+                })
+                .collect();
+            let Some(first) = mine.first() else {
+                // A slug that WOULD have matched before the migration is not a
+                // stranger — it is a stale path, and saying so beats "no captain by
+                // that name" to whoever is holding an old client. It is deliberately
+                // not honoured: a slug is ambiguous by construction, and answering
+                // it for a migrated captain would re-open the pooling this fixed.
+                let mut stale: Vec<&Ship> = ships
+                    .iter()
+                    .filter(|s| {
+                        !s.captain.captain_id.trim().is_empty()
+                            && super::fleet::captain_store(root, &s.captain.captain)
+                                .file_name()
+                                .map(|f| f.to_string_lossy() == *slug)
+                                .unwrap_or(false)
+                    })
+                    .collect();
+                stale.sort_by(|a, b| a.captain.captain_id.cmp(&b.captain.captain_id));
+                stale.dedup_by(|a, b| a.captain.captain_id == b.captain.captain_id);
+                match stale.as_slice() {
+                    [] => return (404, json!({"error": "no captain by that name flies here"})),
+                    [s] => {
+                        return (
+                            410,
+                            json!({"error": "that is a name, not an identity — captains moved to ids",
+                                   "captain": s.captain.captain,
+                                   "captain_id": s.captain.captain_id,
+                                   "captain_brief": format!("/captains/{}/brief", s.captain.captain_id)}),
+                        )
+                    }
+                    // A slug that names MORE than one migrated captain cannot say which
+                    // was meant. Name them all and choose none (round 2, finding 4).
+                    many => {
+                        return (
+                            410,
+                            json!({"error": "that is a name, not an identity — and it names more than one captain here",
+                                   "candidates": many.iter().map(|s| json!({
+                                       "captain": s.captain.captain,
+                                       "captain_id": s.captain.captain_id,
+                                       "captain_brief": format!("/captains/{}/brief", s.captain.captain_id)})).collect::<Vec<_>>()}),
+                        )
+                    }
+                }
+            };
+            let captain = first.captain.captain.clone();
+            let state = computer_state(root, &first.dir, &first.captain);
+            let computer = persona_for(root, &first.dir, &first.captain).and_then(|p| {
+                p.get("name")
+                    .and_then(Value::as_str)
+                    .map(String::from)
+                    .or_else(|| {
+                        p.get("error")
+                            .and_then(Value::as_str)
+                            .map(|e| format!("(will not load: {e})"))
+                    })
+            });
+            let mut rows = Vec::new();
+            let (mut credits, mut debt, mut realized, mut aboard_cost, mut open) = (0, 0, 0, 0, 0);
+            for s in &mine {
+                let (t, ts) = clock(s, clk);
+                let mut row = ship_row(s, root, now);
+                row["tick"] = json!(t);
+                row["tick_seconds"] = json!(ts);
+                credits += row["credits"].as_i64().unwrap_or(0);
+                debt += row["debt"].as_i64().unwrap_or(0);
+                realized += row["trades"]["realized"].as_i64().unwrap_or(0);
+                aboard_cost += row["trades"]["inventory_cost"].as_i64().unwrap_or(0);
+                open += proposals_with_state(&s.dir, t)
+                    .into_iter()
+                    .filter(|p| p["state"] == "open")
+                    .count() as i64;
+                rows.push(row);
+            }
+            // The week's money in summary, pooled — the trend lines live at
+            // /captains/{id}/economy.
+            let economy_week = {
+                let since = now - super::economy::window_seconds(None);
+                let per_hull: Vec<super::economy::History> = mine
+                    .iter()
+                    .map(|s| super::economy::for_ship(&s.dir, since))
+                    .collect();
+                super::economy::to_json(&super::economy::pool(&per_hull, since), false)
+            };
+            (
+                200,
+                json!({
+                    "context": {"kind": "captain", "name": captain, "computer": computer,
+                                "computer_state": state,
+                                "ships": rows.iter().map(|r| r["label"].clone()).collect::<Vec<_>>()},
+                    "captain": captain, "captain_id": first.captain.captain_id,
+                    "computer": computer, "computer_state": state, "ships": rows,
+                    // Her story: every name this captain and their computer have worn,
+                    // and every hull they fly, from the fleet's ledger — oldest first.
+                    // Names are unique and we do not forget them (the rule of 2026-09-08).
+                    "names": names_for(root, &first.captain.captain_id, &mine),
+                    // The week's money in summary, pooled — the trend lines live at
+                    // /captains/{id}/economy.
+                    "economy": economy_week,
+                    // Pooled within this captain, never across (the fleet money boundary).
+                    "book": {"pooled_credits": credits, "debt": debt,
+                             "trades_realized": realized, "aboard_at_cost": aboard_cost},
+                    "open_proposals": open,
+                }),
+            )
+        }
+        ("GET", ["ships"]) => {
+            // Every hull's row reads its exchange (me, receipts, status) — in
+            // PARALLEL, so the bridge waits for the slowest hull rather than the
+            // sum: four hulls over a satellite link took 9–12 s in series
+            // (2026-09-16), which the app read as "cannot connect".
+            let rows: Vec<Value> = std::thread::scope(|sc| {
+                let handles: Vec<_> = ships
+                    .iter()
+                    .map(|s| sc.spawn(move || ship_row(s, root, now)))
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap_or(Value::Null))
+                    .collect()
+            });
+            (
+                200,
+                json!({"ships": ships
+                    .iter()
+                    .zip(rows)
+                    .map(|(s, mut row)| {
+                        let (t, ts) = clock(s, clk);
+                        row["tick"] = json!(t);
+                        row["tick_seconds"] = json!(ts);
+                        row
+                    })
+                    .collect::<Vec<_>>()}),
+            )
+        }
+        ("GET", ["ships", id, "journal"]) => {
+            let Some(s) = find(id) else {
+                return (404, json!({"error": "no such ship"}));
+            };
+            let since: usize = req
+                .query
+                .get("since")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0);
+            let limit: usize = req
+                .query
+                .get("limit")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(500)
+                .min(2000);
+            let text = std::fs::read_to_string(s.dir.join("journal.jsonl")).unwrap_or_default();
+            let all: Vec<&str> = text.lines().collect();
+            let start = since.min(all.len());
+            let end = (start + limit).min(all.len());
+            // Every line says WHICH HULL SPOKE IT. The route already segregates —
+            // one journal per world — but the lines themselves were anonymous, so a
+            // reader that merges two ships into one transcript has nothing to colour
+            // or head them by, and the computer's dialog reads as one voice talking
+            // about two ships at once (found 2026-09-05, on the bridge).
+            //
+            // `world` is the identity and `hull` is the name to show. `hull` alone
+            // would not do it: the LOCAL soak and the PROD hull are BOTH called
+            // Kibble Klipper II, so a reader keying on the name merges two ships
+            // that are not the same ship at all.
+            let lines: Vec<Value> = all[start..end]
+                .iter()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .map(|mut v| {
+                    if let Some(o) = v.as_object_mut() {
+                        o.insert("world".into(), json!(s.world.id));
+                        o.insert("hull".into(), json!(s.world.label));
+                    }
+                    v
+                })
+                .collect();
+            (
+                200,
+                json!({"tick": tick, "tick_seconds": tick_seconds, "since": start, "next": end,
+                         "total": all.len(), "world": s.world.id, "hull": s.world.label,
+                         "lines": lines}),
+            )
+        }
+        ("GET", ["ships", id, "proposals"]) => {
+            let Some(s) = find(id) else {
+                return (404, json!({"error": "no such ship"}));
+            };
+            (
+                200,
+                json!({"tick": tick, "tick_seconds": tick_seconds,
+                         "proposals": proposals_with_state(&s.dir, tick)}),
+            )
+        }
+        // The context brief: everything about ONE ship, in one call, shaped for a
+        // conversation rather than a dashboard. The ask, 2026-09-04: "the communications
+        // with the familiar need to be context aware to the device being used, the
+        // ship being viewed, or a fleet being used, or even an individual captain or
+        // crew being viewed… context makes all the difference." The client says what
+        // the captain is looking at; this answers in that frame.
+        ("GET", ["ships", id, "brief"]) => {
+            let Some(s) = find(id) else {
+                return (404, json!({"error": "no such ship"}));
+            };
+            let (aboard_units, aboard_cost) = aboard(&s.dir);
+            let dial = ucf_pilot::store::load_dial(&s.dir);
+            let open: Vec<Value> = proposals_with_state(&s.dir, tick)
+                .into_iter()
+                .filter(|p| p["state"] == "open")
+                .collect();
+            // The advice standing right now, folded: one line per thing she is saying,
+            // with when she first said it and how often — never the same sentence twice.
+            let text = std::fs::read_to_string(s.dir.join("journal.jsonl")).unwrap_or_default();
+            let lines: Vec<Value> = text
+                .lines()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .collect();
+            let mut advice: BTreeMap<String, (i64, i64, Value)> = BTreeMap::new();
+            for v in lines.iter().filter(|v| {
+                matches!(
+                    v.get("event").and_then(Value::as_str),
+                    Some("advice")
+                        | Some("merchant-idle")
+                        | Some("outfit-idle")
+                        | Some("carry-blocked")
+                        | Some("distress-hold")
+                )
+            }) {
+                let what = v
+                    .get("would")
+                    .or_else(|| v.get("why"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if what.is_empty() {
+                    continue;
+                }
+                let t = v.get("tick").and_then(Value::as_i64).unwrap_or(0);
+                let e = advice.entry(what).or_insert((t, 0, v.clone()));
+                e.1 += 1;
+                e.2 = v.clone();
+            }
+            let standing: Vec<Value> = advice
+                .into_iter()
+                .map(|(what, (since, times, last))| {
+                    json!({"what": what, "since_tick": since, "times": times,
+                           "event": last.get("event").cloned().unwrap_or(Value::Null),
+                           "surface": last.get("surface").cloned().unwrap_or(Value::Null)})
+                })
+                .collect();
+            let recent: Vec<Value> = lines
+                .iter()
+                .rev()
+                .filter(|v| {
+                    !matches!(
+                        v.get("event").and_then(Value::as_str),
+                        Some("holding")
+                            | Some("advice")
+                            | Some("merchant-idle")
+                            | Some("outfit-idle")
+                            | Some("distress-hold")
+                            | Some("awaiting-pending-actions")
+                            | Some("awaiting-our-own-fold")
+                    )
+                })
+                .take(12)
+                .cloned()
+                .collect();
+            let mut row = ship_row(s, root, now);
+            row["tick"] = json!(tick);
+            row["tick_seconds"] = json!(tick_seconds);
+            // Named, or the reason there is no name — never null for a file that has
+            // a name in it (round 2, finding 7).
+            let state = computer_state(root, &s.dir, &s.captain);
+            let computer_word = match state["state"].as_str() {
+                Some("named") => state["name"].clone(),
+                Some("broken") => json!(format!(
+                    "(will not load: {})",
+                    state["error"].as_str().unwrap_or("")
+                )),
+                _ => Value::Null,
+            };
+            (
+                200,
+                json!({
+                    "context": {"kind": "ship", "world": s.world.id, "hull": s.world.label,
+                                "captain": s.captain.captain,
+                                // Named, or the reason there is no name — never null for
+                                // a file that has a name in it (round 2, finding 7).
+                                "computer": computer_word,
+                                "computer_state": state},
+                    "tick": tick, "tick_seconds": tick_seconds,
+                    "ship": row,
+                    "aboard": {"units": aboard_units, "cost": aboard_cost},
+                    "dial": dial.settings,
+                    "open_proposals": open,
+                    "standing_advice": standing,
+                    "recent": recent,
+                }),
+            )
+        }
+        ("GET", ["ships", id, "book"]) => {
+            let Some(s) = find(id) else {
+                return (404, json!({"error": "no such ship"}));
+            };
+            let holdings: Value = std::fs::read_to_string(s.dir.join("holdings.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok())
+                .unwrap_or(json!([]));
+            let deliveries: Vec<Value> = std::fs::read_to_string(s.dir.join("deliveries.jsonl"))
+                .map(|t| {
+                    t.lines()
+                        .filter_map(|l| serde_json::from_str(l).ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+            (
+                200,
+                json!({"tick": tick, "tick_seconds": tick_seconds,
+                         "holdings": holdings, "deliveries": deliveries}),
+            )
+        }
+        // Everything a conversation about fuel needs, computed rather than recited:
+        // where she can reach, what it would cost, what she would do, and why the
+        // tanker is refused. The complaint, 2026-09-04, after a conversation with
+        // the ship's computer in the app: "all it did was read out ships status,
+        // nothing particularly useful, no conversation about refueling which is what
+        // I was attempting to have."
+        ("GET", ["ships", id, "fuel"]) => {
+            let Some(s) = find(id) else {
+                return (404, json!({"error": "no such ship"}));
+            };
+            let key = read_env_value(&s.dir.join("ucf.env"), "UCF_KEY").unwrap_or_default();
+            let server = read_env_value(&s.dir.join("ucf.env"), "UCF_SERVER")
+                .unwrap_or_else(|| s.captain.server.clone());
+            let Ok(me) = wire_get(&server, &key, "/v1/me") else {
+                return (502, json!({"error": "the exchange did not answer"}));
+            };
+            let n = |k: &str| me.get(k).and_then(Value::as_i64).unwrap_or(0);
+            let here = me.get("docked").and_then(Value::as_str).map(String::from);
+            let (fuel, capacity, credits) = (n("fuel"), n("fuelCapacity"), n("credits"));
+            let accel = if n("effectiveAccelMilliG") > 0 {
+                n("effectiveAccelMilliG")
+            } else {
+                ucf_pilot::doctrine::REFERENCE_ACCEL_MILLI_G
+            };
+            let pumps: Vec<String> = match wire_get(&server, &key, "/v1/stations") {
+                Ok(Value::Array(rows)) => rows
+                    .iter()
+                    .filter(|st| {
+                        st.get("sellsFuel")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false)
+                    })
+                    .filter_map(|st| st.get("id").and_then(Value::as_str).map(String::from))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let tank_price = (capacity - fuel).max(0) * FUEL_PRICE_PER_UNIT;
+            let mut options: Vec<Value> = Vec::new();
+            if let Some(here) = here.as_deref() {
+                for p in &pumps {
+                    if p == here {
+                        options.push(json!({"station": p, "here": true, "fuel_cost": 0,
+                            "reachable": true, "fill_price": tank_price,
+                            "affordable": credits >= tank_price}));
+                        continue;
+                    }
+                    let Ok(route) =
+                        wire_get(&server, &key, &format!("/v1/route?from={here}&to={p}"))
+                    else {
+                        continue;
+                    };
+                    let quoted = route.get("totalFuel").and_then(Value::as_i64).unwrap_or(0);
+                    let ticks = route.get("totalTicks").and_then(Value::as_i64).unwrap_or(0);
+                    // The quote is for the reference drive; she flies at her own.
+                    let cost = ucf_pilot::doctrine::fuel_at_drive(quoted, accel);
+                    options.push(json!({
+                        "station": p, "here": false, "fuel_cost": cost, "ticks": ticks,
+                        "reachable": ucf_pilot::trade::carry_affordable(cost, fuel),
+                        "short_by": (((cost as f64) * 1.2) as i64 - fuel).max(0),
+                        "fill_price": tank_price, "affordable": credits >= tank_price,
+                    }));
+                }
+            }
+            options.sort_by_key(|o| o["fuel_cost"].as_i64().unwrap_or(i64::MAX));
+            let reachable: Vec<&Value> = options
+                .iter()
+                .filter(|o| o["reachable"].as_bool().unwrap_or(false))
+                .collect();
+            // What she can sell where she stands, for a captain with no credits.
+            let hold: Vec<Value> = me
+                .get("cargo")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let saleable = here.as_deref().and_then(|h| {
+                wire_get(&server, &key, &format!("/v1/stations/{h}/quotes"))
+                    .ok()
+                    .map(|q| {
+                        let board = ucf_pilot::trade::parse_board(&q);
+                        hold.iter()
+                            .filter_map(|c| {
+                                let good = c.get("good")?.as_str()?;
+                                let units = c.get("units")?.as_i64()?;
+                                if units <= 0 {
+                                    return None;
+                                }
+                                let row = board.iter().find(|b| b.good == good)?;
+                                let can = units.min(row.max_sell.max(0));
+                                Some(json!({"good": good, "units": units, "bid": row.bid,
+                                            "will_take": can, "worth": can * row.bid}))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+            });
+            (
+                200,
+                json!({
+                    "tick": tick, "tick_seconds": tick_seconds,
+                    "docked": here, "fuel": fuel, "capacity": capacity, "credits": credits,
+                    "accel_milli_g": accel, "fill_price_here": tank_price,
+                    "pumps": options,
+                    "can_reach": reachable.iter().map(|o| o["station"].clone()).collect::<Vec<_>>(),
+                    "stranded": here.is_some() && reachable.is_empty(),
+                    "saleable_here": saleable,
+                    // The tanker, and why the pilot will not call it on a real-time world.
+                    "tanker": {
+                        "available": true,
+                        "pilot_will_call": false,
+                        "why": "a PAWS call-out on this world is days of transit and pins the hull                             where it stands until the tanker arrives (metal#59); the pilot holds                             a distress instead, which a fuelable load or a human can still undo",
+                    },
+                    "if_stranded": "sell what this berth will take for credits, wait for a load whose                                 origin is reachable, ask another captain (metal#75 proposes fuel                                 between hulls), or call the tanker knowingly",
+                }),
+            )
+        }
+        // The captain's standing orders on a hull: list, place, withdraw.
+        ("GET", ["ships", id, "orders"]) => {
+            let Some(s) = find(id) else {
+                return (404, json!({"error": "no such ship"}));
+            };
+            (
+                200,
+                json!({"tick": tick, "tick_seconds": tick_seconds,
+                         "orders": ucf_pilot::store::load_orders(&s.dir)}),
+            )
+        }
+        ("POST", ["ships", id, "orders"]) => {
+            let Some(s) = find(id) else {
+                return (404, json!({"error": "no such ship"}));
+            };
+            let Ok(b) = serde_json::from_slice::<Value>(&req.body) else {
+                return (400, json!({"error": "json"}));
+            };
+            match place_order(s, &b, now) {
+                Ok(order) => (
+                    201,
+                    json!({"tick": tick, "tick_seconds": tick_seconds, "order": order}),
+                ),
+                Err((code, why)) => (code, json!({"error": why})),
+            }
+        }
+        // The captain's word to the whole fleet ("bring all the ships to paws truck
+        // stop, wait there"): one order, placed on every hull the captain
+        // flies, answered hull by hull — a station one hull cannot resolve refuses
+        // that hull alone and says so.
+        ("POST", ["captains", slug, "orders"]) => {
+            let mine: Vec<&Ship> = ships
+                .iter()
+                .filter(|s| {
+                    !s.captain.captain_id.trim().is_empty() && s.captain.captain_id == *slug
+                })
+                .collect();
+            if mine.is_empty() {
+                return (
+                    404,
+                    json!({"error": "no captain by that identity flies here"}),
+                );
+            }
+            let Ok(b) = serde_json::from_slice::<Value>(&req.body) else {
+                return (400, json!({"error": "json"}));
+            };
+            let mut placed = Vec::new();
+            let mut refused = Vec::new();
+            for s in mine {
+                match place_order(s, &b, now) {
+                    Ok(order) => placed
+                        .push(json!({"world": s.world.id, "label": s.world.label, "order": order})),
+                    Err((_, why)) => refused
+                        .push(json!({"world": s.world.id, "label": s.world.label, "why": why})),
+                }
+            }
+            let code = if placed.is_empty() { 400 } else { 201 };
+            (
+                code,
+                json!({"tick": tick, "tick_seconds": tick_seconds,
+                       "placed": placed, "refused": refused}),
+            )
+        }
+        ("DELETE", ["ships", id, "orders", oid]) => {
+            let Some(s) = find(id) else {
+                return (404, json!({"error": "no such ship"}));
+            };
+            let mut orders = ucf_pilot::store::load_orders(&s.dir);
+            let before = orders.len();
+            orders.retain(|o| !(o.id == *oid && o.pending()));
+            if orders.len() == before {
+                return (404, json!({"error": "no pending order by that id"}));
+            }
+            match ucf_pilot::store::save_orders(&s.dir, &orders) {
+                Ok(()) => (
+                    200,
+                    json!({"tick": tick, "tick_seconds": tick_seconds, "withdrawn": oid}),
+                ),
+                Err(e) => (500, json!({"error": e.to_string()})),
+            }
+        }
+        ("GET", ["ships", id, "dial"]) => {
+            let Some(s) = find(id) else {
+                return (404, json!({"error": "no such ship"}));
+            };
+            let dial = ucf_pilot::store::load_dial(&s.dir);
+            let bought: Value = std::fs::read_to_string(s.dir.join("automations.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok())
+                .unwrap_or(json!([]));
+            let effective: BTreeMap<String, &str> = Surface::all()
+                .iter()
+                .map(|x| (x.key(), dial.level(*x).name()))
+                .collect();
+            (
+                200,
+                json!({"tick": tick, "tick_seconds": tick_seconds, "dial": dial.settings,
+                         "bought": bought, "effective": effective}),
+            )
+        }
+        ("POST", ["ships", id, "approve"]) => {
+            let Some(s) = find(id) else {
+                return (404, json!({"error": "no such ship"}));
+            };
+            let Ok(b) = serde_json::from_slice::<Value>(&req.body) else {
+                return (400, json!({"error": "json"}));
+            };
+            let Some(pid) = b.get("id").and_then(Value::as_str) else {
+                return (400, json!({"error": "id"}));
+            };
+            let approved = b.get("approved").and_then(Value::as_bool).unwrap_or(false);
+            if !ucf_pilot::store::load_proposals(&s.dir)
+                .iter()
+                .any(|p| p.id == pid)
+            {
+                return (404, json!({"error": "no such proposal"}));
+            }
+            let a = Approval {
+                id: pid.to_string(),
+                approved,
+                at: now,
+            };
+            ucf_pilot::store::append_approval(&s.dir, &a);
+            (
+                200,
+                json!({"tick": tick, "tick_seconds": tick_seconds, "approval": a}),
+            )
+        }
+        ("POST", ["ships", id, "rename"]) => {
+            let Some(s) = find(id) else {
+                return (404, json!({"error": "no such ship"}));
+            };
+            let Ok(b) = serde_json::from_slice::<Value>(&req.body) else {
+                return (400, json!({"error": "json"}));
+            };
+            let Some(name) = b.get("name").and_then(Value::as_str).map(str::trim) else {
+                return (400, json!({"error": "name"}));
+            };
+            if name.is_empty() || name.chars().count() > 40 {
+                return (400, json!({"error": "a name is 1–40 characters"}));
+            }
+            // The captain's computer, not the hull's: one rename, the whole fleet.
+            let out = std::process::Command::new(
+                std::env::current_exe().unwrap_or_else(|_| "ucf-familiar".into()),
+            )
+            .args([
+                "fleet",
+                "rename",
+                id,
+                name,
+                "--data-dir",
+                &dir.to_string_lossy(),
+            ])
+            .output();
+            match out {
+                Ok(o) if o.status.success() => (
+                    200,
+                    json!({"tick": tick, "tick_seconds": tick_seconds, "name": name,
+                           "captain": s.captain.captain,
+                           "output": String::from_utf8_lossy(&o.stdout).trim().to_string()}),
+                ),
+                Ok(o) => (
+                    400,
+                    json!({"error": String::from_utf8_lossy(&o.stderr).trim().to_string()}),
+                ),
+                Err(e) => (500, json!({"error": e.to_string()})),
+            }
+        }
+        // Remove a ship from the fleet — the same act as `fleet unpair`: the pilot
+        // stops, the key file goes, the world is decommissioned; the journal, the
+        // deliveries and the computer's persona stay for the captain (we do not
+        // forget). Asked for 2026-09-09: "no way to delete a ship from your fleet…
+        // the app should allow for that."
+        ("DELETE", ["ships", id]) => {
+            let Some(s) = find(id) else {
+                return (404, json!({"error": "no such ship"}));
+            };
+            let out = std::process::Command::new(
+                std::env::current_exe().unwrap_or_else(|_| "ucf-familiar".into()),
+            )
+            .args(["fleet", "unpair", id, "--data-dir", &dir.to_string_lossy()])
+            .output();
+            match out {
+                Ok(o) if o.status.success() => (
+                    200,
+                    json!({"tick": tick, "tick_seconds": tick_seconds, "unpaired": s.world.id,
+                           "label": s.world.label, "captain": s.captain.captain,
+                           "output": String::from_utf8_lossy(&o.stdout).trim().to_string()}),
+                ),
+                Ok(o) => (
+                    400,
+                    json!({"error": String::from_utf8_lossy(&o.stderr).trim().to_string()}),
+                ),
+                Err(e) => (500, json!({"error": e.to_string()})),
+            }
+        }
+        ("PUT", ["ships", id, "captain"]) => {
+            let Some(s) = find(id) else {
+                return (404, json!({"error": "no such ship"}));
+            };
+            let Ok(b) = serde_json::from_slice::<Value>(&req.body) else {
+                return (400, json!({"error": "json"}));
+            };
+            let Some(captain) = b.get("captain").and_then(Value::as_str).map(str::trim) else {
+                return (400, json!({"error": "captain"}));
+            };
+            if captain.is_empty() || captain.chars().count() > 60 {
+                return (400, json!({"error": "a captain is 1–60 characters"}));
+            }
+            let was = s.captain.captain.clone();
+            let Ok(text) = std::fs::read_to_string(s.dir.join("captain.json")) else {
+                return (500, json!({"error": "captain.json"}));
+            };
+            let Ok(mut c) = serde_json::from_str::<Value>(&text) else {
+                return (500, json!({"error": "captain.json is not json"}));
+            };
+            c["captain"] = json!(captain);
+            if let Err(e) = std::fs::write(
+                s.dir.join("captain.json"),
+                serde_json::to_vec_pretty(&c).unwrap_or_default(),
+            ) {
+                return (500, json!({"error": e.to_string()}));
+            }
+            // The old captain's store is KEPT, however empty and whoever named it: a
+            // persona and its trail are a history, and we do not forget names (the
+            // rule of 2026-09-08). It used to be swept when nobody flew for them any more.
+            let old_store = super::fleet::captain_store(root, &was);
+            let swept = false;
+            if let Err(e) = super::fleet::record_name(
+                root,
+                &super::fleet::NameEntry {
+                    at: now,
+                    kind: "captain".into(),
+                    name: captain.to_string(),
+                    holder: s.captain.captain_id.clone(),
+                    act: "reassigned".into(),
+                    from: was.clone(),
+                    by: "feed".into(),
+                    pronouns: String::new(),
+                },
+            ) {
+                return (
+                    500,
+                    json!({"error": format!("the names ledger could not be written: {e}")}),
+                );
+            }
+            let joined = persona_for(root, &s.dir, &s.captain)
+                .and_then(|p| p.get("name").and_then(Value::as_str).map(String::from));
+            (
+                200,
+                json!({"tick": tick, "tick_seconds": tick_seconds, "captain": captain,
+                         "was": was, "computer": joined, "retired_old_captain_store": swept,
+                         "old_captain_store": if old_store.is_dir() { "kept" } else { "none" }}),
+            )
+        }
+        ("PUT", ["ships", id, "automations"]) => {
+            let Some(s) = find(id) else {
+                return (404, json!({"error": "no such ship"}));
+            };
+            let Ok(b) = serde_json::from_slice::<Value>(&req.body) else {
+                return (400, json!({"error": "json"}));
+            };
+            let Some(list) = b.get("automations").and_then(Value::as_array) else {
+                return (400, json!({"error": "automations: a list of names"}));
+            };
+            // Only names the pilot knows: an unknown grant would sit in the file
+            // meaning nothing, and the captain would think they had bought something.
+            let mut names = Vec::new();
+            for v in list {
+                let Some(n) = v.as_str() else {
+                    return (400, json!({"error": "automations: names are strings"}));
+                };
+                if ucf_pilot::Automation::parse(n).is_none() {
+                    return (400, json!({"error": format!("unknown automation `{n}`")}));
+                }
+                names.push(n.to_string());
+            }
+            if let Err(e) = std::fs::write(
+                s.dir.join("automations.json"),
+                serde_json::to_vec_pretty(&names).unwrap_or_default(),
+            ) {
+                return (500, json!({"error": e.to_string()}));
+            }
+            // captain.json remembers what was bought, so `fleet status` and a re-pair
+            // agree with the file the pilot reads.
+            if let Ok(text) = std::fs::read_to_string(s.dir.join("captain.json")) {
+                if let Ok(mut c) = serde_json::from_str::<Value>(&text) {
+                    c["automations"] = json!(names);
+                    let _ = std::fs::write(
+                        s.dir.join("captain.json"),
+                        serde_json::to_vec_pretty(&c).unwrap_or_default(),
+                    );
+                }
+            }
+            (
+                200,
+                json!({"tick": tick, "tick_seconds": tick_seconds, "automations": names,
+                         "note": "the pilot reads its grants at start — restart it to grant now"}),
+            )
+        }
+        ("PUT", ["ships", id, "dial"]) => {
+            let Some(s) = find(id) else {
+                return (404, json!({"error": "no such ship"}));
+            };
+            let Ok(b) = serde_json::from_slice::<Value>(&req.body) else {
+                return (400, json!({"error": "json"}));
+            };
+            let Some(obj) = b.as_object() else {
+                return (400, json!({"error": "object"}));
+            };
+            let mut dial = Dial::default();
+            for (k, v) in obj {
+                let Some(level) = v.as_str().and_then(Level::parse) else {
+                    return (
+                        400,
+                        json!({"error": format!("`{k}`: level must be advise|confirm|auto")}),
+                    );
+                };
+                if let Err(e) = dial.set(k, level) {
+                    return (400, json!({"error": e}));
+                }
+            }
+            if let Err(e) = ucf_pilot::store::save_dial(&s.dir, &dial) {
+                return (500, json!({"error": e.to_string()}));
+            }
+            (
+                200,
+                json!({"tick": tick, "tick_seconds": tick_seconds, "dial": dial.settings}),
+            )
+        }
+        ("POST", ["pair"]) => {
+            let Ok(b) = serde_json::from_slice::<Value>(&req.body) else {
+                return (400, json!({"error": "json"}));
+            };
+            let get = |k: &str| b.get(k).and_then(Value::as_str).map(String::from);
+            let (Some(label), Some(captain), Some(server), Some(key)) =
+                (get("label"), get("captain"), get("server"), get("key"))
+            else {
+                return (400, json!({"error": "label, captain, server, key"}));
+            };
+            // The same ceremony as `fleet pair`, run as that command so one code path
+            // owns commissioning; the key travels by a 0600 temp file, never argv.
+            let tmp = dir.join(format!(".pair-{}.key", now));
+            if std::fs::write(&tmp, &key).is_err() {
+                return (500, json!({"error": "key file"}));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+            }
+            let autos = b
+                .get("automations")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_else(|| "freight".into());
+            let mut cmd = std::process::Command::new(
+                std::env::current_exe().unwrap_or_else(|_| "ucf-familiar".into()),
+            );
+            cmd.args([
+                "fleet",
+                "pair",
+                "--label",
+                &label,
+                "--captain",
+                &captain,
+                "--server",
+                &server,
+                "--key-file",
+                &tmp.to_string_lossy(),
+                "--automations",
+                &autos,
+                "--data-dir",
+                &dir.to_string_lossy(),
+            ]);
+            if let Some(cid) = get("captain_id").filter(|c| !c.trim().is_empty()) {
+                cmd.args(["--captain-id", cid.trim()]);
+            }
+            if let Some(pa) = get("pilot_args") {
+                cmd.args(["--pilot-args", &pa]);
+            }
+            // The name the captain typed. This route never forwarded it, so a captain
+            // naming their computer Felix on a first pairing over the wire got Purr and
+            // no error — the CLI supports it and only the feed did not (a design
+            // review finding).
+            if let Some(name) = get("computer_name").or_else(|| get("computer-name")) {
+                cmd.args(["--computer-name", &name]);
+            }
+            let out = cmd.output();
+            let _ = std::fs::remove_file(&tmp);
+            match out {
+                Ok(o) if o.status.success() => {
+                    let text = String::from_utf8_lossy(&o.stdout).to_string();
+                    let world = text
+                        .split_whitespace()
+                        .find(|w| w.starts_with("world-"))
+                        .unwrap_or("")
+                        .to_string();
+                    (
+                        200,
+                        json!({"tick": tick, "tick_seconds": tick_seconds, "world": world, "output": text}),
+                    )
+                }
+                Ok(o) => (
+                    400,
+                    json!({"error": String::from_utf8_lossy(&o.stderr).to_string()}),
+                ),
+                Err(e) => (500, json!({"error": e.to_string()})),
+            }
+        }
+        ("POST", ["unpair"]) => {
+            let Ok(b) = serde_json::from_slice::<Value>(&req.body) else {
+                return (400, json!({"error": "json"}));
+            };
+            let Some(world) = b.get("world").and_then(Value::as_str) else {
+                return (400, json!({"error": "world"}));
+            };
+            if find(world).is_none() {
+                return (404, json!({"error": "no such ship"}));
+            }
+            let out = std::process::Command::new(
+                std::env::current_exe().unwrap_or_else(|_| "ucf-familiar".into()),
+            )
+            .args([
+                "fleet",
+                "unpair",
+                world,
+                "--data-dir",
+                &dir.to_string_lossy(),
+            ])
+            .output();
+            match out {
+                Ok(o) if o.status.success() => (
+                    200,
+                    json!({"tick": tick, "tick_seconds": tick_seconds,
+                    "output": String::from_utf8_lossy(&o.stdout).to_string()}),
+                ),
+                Ok(o) => (
+                    400,
+                    json!({"error": String::from_utf8_lossy(&o.stderr).to_string()}),
+                ),
+                Err(e) => (500, json!({"error": e.to_string()})),
+            }
+        }
+        ("GET", _) | ("POST", _) | ("PUT", _) => (404, json!({"error": "no such route"})),
+        _ => (405, json!({"error": "method"})),
+    }
+}
+
+pub(crate) fn serve(dir: &Path, root: &Path, bind: &str) -> ExitCode {
+    let tok = match token(dir) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("fleet serve: token: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let listener = match TcpListener::bind(bind) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("fleet serve: bind {bind}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!(
+        "fleet serve: listening on {bind} — bearer in {} ({}…{}) — GET /ships, /ships/{{world}}/journal|proposals|dial; POST approve, PUT dial, POST pair|unpair",
+        dir.join("fleet-serve.token").display(),
+        &tok[..4],
+        &tok[tok.len() - 4..]
+    );
+    let dir = dir.to_path_buf();
+    let root = root.to_path_buf();
+    let clk = std::sync::Arc::new(std::sync::Mutex::new(Clocks::new()));
+    for conn in listener.incoming() {
+        let Ok(mut stream) = conn else { continue };
+        let (dir, root, tok, clk) = (dir.clone(), root.clone(), tok.clone(), clk.clone());
+        std::thread::spawn(move || {
+            let Some(req) = read_request(&mut stream) else {
+                respond(&mut stream, 400, &json!({"error": "request"}));
+                return;
+            };
+            let (status, body) = {
+                let mut c = clk.lock().unwrap_or_else(|e| e.into_inner());
+                handle(req, &dir, &root, &tok, &mut c)
+            };
+            respond(&mut stream, status, &body);
+        });
+    }
+    ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::super::fleet::{captain_store_by_id, Captain};
+    use super::*;
+    use std::path::PathBuf;
+
+    fn base(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("fleet_serve_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(p.join("worlds")).unwrap();
+        p
+    }
+
+    /// A paired hull on disk, with no exchange behind it (the server refuses fast).
+    fn hull(base: &Path, label: &str, captain: &str, captain_id: &str) -> Ship {
+        let root = base.join("worlds");
+        let (w, dir) = ucf_world::instance::commission(
+            base,
+            &root,
+            label,
+            "the captain",
+            "http://127.0.0.1:1",
+            1_700_000_000,
+        )
+        .unwrap();
+        let rec = Captain {
+            captain_id: captain_id.into(),
+            captain: captain.into(),
+            key_id: "k".into(),
+            server: "http://127.0.0.1:1".into(),
+            automations: vec![],
+            paired_at: 0,
+            hull_name: String::new(),
+            pilot_args: vec![],
+            exchange_captain_id: String::new(),
+        };
+        std::fs::write(
+            dir.join("captain.json"),
+            serde_json::to_vec_pretty(&rec).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("ucf.env"),
+            "UCF_KEY=ucfk_x\nUCF_SERVER=http://127.0.0.1:1\n",
+        )
+        .unwrap();
+        Ship {
+            world: w,
+            dir,
+            captain: rec,
+        }
+    }
+
+    fn get(path: &str, base: &Path) -> (u16, Value) {
+        // Split the query the way read_request does, so a test path can carry one.
+        let (path, query) = match path.split_once('?') {
+            Some((p, q)) => (
+                p.to_string(),
+                q.split('&')
+                    .filter_map(|kv| kv.split_once('='))
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect::<BTreeMap<String, String>>(),
+            ),
+            None => (path.to_string(), BTreeMap::new()),
+        };
+        let req = Req {
+            method: "GET".into(),
+            path,
+            query,
+            bearer: Some("tok".into()),
+            body: Vec::new(),
+        };
+        handle(req, base, &base.join("worlds"), "tok", &mut Clocks::new())
+    }
+
+    /// A captain whose store the loader refuses is BROKEN on
+    /// every surface — typed, with the reason — and never "unnamed", even with a
+    /// valid ship-local record sitting beside it.
+    #[test]
+    fn a_broken_captain_store_is_broken_on_every_surface_not_unnamed() {
+        let b = base("broken");
+        let root = b.join("worlds");
+        let s = hull(&b, "Kibble", "Luke", "cpt-test");
+        let store = captain_store_by_id(&root, "cpt-test");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::write(
+            store.join("persona.json"),
+            r#"{"name":"X","not_a_field":1}"#,
+        )
+        .unwrap();
+        ucf_persona::persona::write(
+            &s.dir,
+            &ucf_persona::persona::Persona {
+                persona_version: 2,
+                name: "Local".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let row = ship_row(&s, &root, 0);
+        assert_eq!(
+            row["computer_state"]["state"], "broken",
+            "{}",
+            row["computer_state"]
+        );
+        assert!(row["computer_state"]["error"].is_string());
+        assert!(
+            row["persona"]["error"].is_string(),
+            "the old field is untouched"
+        );
+
+        let (code, fleet) = get("/brief", &b);
+        assert_eq!(code, 200);
+        assert_eq!(fleet["captains"][0]["captain_id"], "cpt-test");
+        assert_eq!(fleet["captains"][0]["computer_state"]["state"], "broken");
+        assert!(fleet["captains"][0]["computer"]
+            .as_str()
+            .unwrap()
+            .starts_with("(will not load"));
+
+        let (code, cap) = get("/captains/cpt-test/brief", &b);
+        assert_eq!(code, 200);
+        assert_eq!(cap["context"]["computer_state"]["state"], "broken");
+        assert_eq!(cap["computer_state"]["state"], "broken");
+        assert!(cap["context"]["computer"]
+            .as_str()
+            .unwrap()
+            .starts_with("(will not load"));
+
+        let (code, ship) = get(&format!("/ships/{}/brief", s.world.id), &b);
+        assert_eq!(code, 200);
+        assert_eq!(ship["context"]["computer_state"]["state"], "broken");
+        let word = ship["context"]["computer"].as_str().unwrap_or("");
+        assert!(
+            word.starts_with("(will not load"),
+            "was null on a broken record: {}",
+            ship["context"]
+        );
+        assert!(!word.contains("unnamed"));
+    }
+
+    /// Her story rides the captain brief: her own captain and computer rows and the
+    /// hulls she flies, and nobody else's; the whole ledger sits at GET /names.
+    #[test]
+    fn a_captains_names_ride_her_brief_and_the_whole_ledger_has_a_route() {
+        let b = base("names");
+        let root = b.join("worlds");
+        let luke = hull(&b, "Kibble", "Luke", "cpt-luke");
+        let _ann = hull(&b, "Tuna", "Ann", "cpt-ann");
+        let at = 1_700_000_000;
+        for (kind, name, holder, act, from) in [
+            ("captain", "Luke", "cpt-luke", "paired", ""),
+            ("computer", "Felix", "cpt-luke", "named", ""),
+            (
+                "hull",
+                "Kibble Klipper",
+                luke.world.id.as_str(),
+                "paired",
+                "",
+            ),
+            ("captain", "Ann", "cpt-ann", "paired", ""),
+            ("computer", "Mittens", "cpt-ann", "named", ""),
+            ("computer", "Mrs. Norris", "cpt-luke", "renamed", "Felix"),
+        ] {
+            super::super::fleet::record_name(
+                &root,
+                &super::super::fleet::NameEntry {
+                    at,
+                    kind: kind.into(),
+                    name: name.into(),
+                    holder: holder.into(),
+                    act: act.into(),
+                    from: from.into(),
+                    by: "test".into(),
+                    pronouns: String::new(),
+                },
+            )
+            .unwrap();
+        }
+        let (code, cap) = get("/captains/cpt-luke/brief", &b);
+        assert_eq!(code, 200);
+        let names: Vec<&str> = cap["names"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            ["Luke", "Felix", "Kibble Klipper", "Mrs. Norris"],
+            "hers, oldest first, nobody else's"
+        );
+        assert_eq!(cap["names"][3]["from"], "Felix", "lineage rides too");
+        let (code, all) = get("/names", &b);
+        assert_eq!(code, 200);
+        assert_eq!(all["names"].as_array().map(Vec::len), Some(6));
+    }
+
+    /// A captain's economy rides its own route, pooled across her hulls, and
+    /// her brief carries the week in summary.
+    #[test]
+    fn a_captains_economy_has_a_route_and_a_summary_on_her_brief() {
+        let b = base("economy");
+        let one = hull(&b, "One", "Luke", "cpt-luke");
+        let two = hull(&b, "Two", "Luke", "cpt-luke");
+        let now = super::super::now_secs();
+        std::fs::write(
+            one.dir.join("journal.jsonl"),
+            format!(
+                "{{\"at\":{},\"tick\":1,\"event\":\"holding\",\"credits\":1000}}\n{{\"at\":{},\"tick\":2,\"event\":\"load-closed\",\"credits\":1300,\"load\":\"L1\"}}\n",
+                now - 7200,
+                now - 3600
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            two.dir.join("journal.jsonl"),
+            format!(
+                "{{\"at\":{},\"tick\":1,\"event\":\"holding\",\"credits\":500}}\n",
+                now - 7200 /* same instant as hull one's first reading: the pooled start must not depend on an hour boundary */
+            ),
+        )
+        .unwrap();
+        let (code, v) = get("/captains/cpt-luke/economy?window=24h", &b);
+        assert_eq!(code, 200, "{v}");
+        assert_eq!(v["pooled"]["flows"]["freight"], 300);
+        assert_eq!(v["pooled"]["summary"]["credits_now"], 1800);
+        assert_eq!(v["hulls"].as_array().map(Vec::len), Some(2));
+        assert!(
+            v["pooled"]["analysis"][0]
+                .as_str()
+                .unwrap()
+                .starts_with("+ℳ300"),
+            "{v}"
+        );
+        let (code, cap) = get("/captains/cpt-luke/brief", &b);
+        assert_eq!(code, 200);
+        assert_eq!(cap["economy"]["flows"]["freight"], 300);
+        assert!(
+            cap["economy"].get("points").is_none(),
+            "the brief carries the summary only"
+        );
+    }
+
+    /// The row's persona rides WHOLE, pronouns included, now that the app's reader
+    /// carries the field (build 8); computer_state still says them too.
+    #[test]
+    fn the_rows_persona_rides_whole_with_its_pronouns() {
+        let b = base("strict_persona");
+        let root = b.join("worlds");
+        let s = hull(&b, "One", "Luke", "cpt-p");
+        let store = captain_store_by_id(&root, "cpt-p");
+        let (pron, _) = ucf_persona::persona::choose_gender(&ucf_persona::persona::NamingContext {
+            captain: "Luke".into(),
+            name: "Felix".into(),
+            ..Default::default()
+        });
+        ucf_persona::persona::write(
+            &store,
+            &ucf_persona::persona::Persona {
+                persona_version: 2,
+                name: "Felix".into(),
+                pronouns: Some(pron.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let row = ship_row(&s, &root, 0);
+        assert_eq!(
+            row["persona"]["pronouns"]["label"], pron.label,
+            "{}",
+            row["persona"]
+        );
+        assert_eq!(row["persona"]["name"], "Felix");
+        assert_eq!(row["computer_state"]["pronouns"]["label"], pron.label);
+    }
+
+    /// Orders are placed, listed and withdrawn on the feed, and counted on the row.
+    #[test]
+    fn a_captain_places_lists_and_withdraws_an_order_on_the_feed() {
+        let b = base("orders");
+        let s = hull(&b, "One", "Luke", "cpt-o");
+        let post = |body: &str| {
+            let req = Req {
+                method: "POST".into(),
+                path: format!("/ships/{}/orders", s.world.id),
+                query: BTreeMap::new(),
+                bearer: Some("tok".into()),
+                body: body.as_bytes().to_vec(),
+            };
+            handle(req, &b, &b.join("worlds"), "tok", &mut Clocks::new())
+        };
+        let (code, v) = post(r#"{"verb":"repair"}"#);
+        assert_eq!(code, 201, "{v}");
+        let oid = v["order"]["id"].as_str().unwrap().to_string();
+        assert_eq!(v["order"]["when"], "next-docking");
+        assert_eq!(v["order"]["by"], "Luke");
+        let (code, v) = post(r#"{"verb":"payLease"}"#);
+        assert_eq!(code, 400, "{v}");
+        let (code, v) = get(&format!("/ships/{}/orders", s.world.id), &b);
+        assert_eq!(code, 200);
+        assert_eq!(v["orders"].as_array().map(Vec::len), Some(1));
+        assert_eq!(ship_row(&s, &b.join("worlds"), 0)["orders"]["pending"], 1);
+        let req = Req {
+            method: "DELETE".into(),
+            path: format!("/ships/{}/orders/{oid}", s.world.id),
+            query: BTreeMap::new(),
+            bearer: Some("tok".into()),
+            body: Vec::new(),
+        };
+        let (code, v) = handle(req, &b, &b.join("worlds"), "tok", &mut Clocks::new());
+        assert_eq!(code, 200, "{v}");
+        assert!(ucf_pilot::store::load_orders(&s.dir).is_empty());
+    }
+
+    /// The captain's word to the fleet — "bring all the ships to paws truck
+    /// stop, wait there" — is a travel and a hold on every hull the captain flies,
+    /// the station folded to the exchange's id (no register to read here, so the
+    /// fold is trusted and the exchange judges it), the hold superseding the travel
+    /// as the standing course, another captain's hull untouched.
+    #[test]
+    fn the_captains_word_reaches_every_hull_of_the_fleet() {
+        let b = base("fleet-orders");
+        let one = hull(&b, "One", "Luke", "cpt-f");
+        let two = hull(&b, "Two", "Luke", "cpt-f");
+        let other = hull(&b, "Three", "Mara", "cpt-g");
+        let post = |path: String, body: &str| {
+            let req = Req {
+                method: "POST".into(),
+                path,
+                query: BTreeMap::new(),
+                bearer: Some("tok".into()),
+                body: body.as_bytes().to_vec(),
+            };
+            handle(req, &b, &b.join("worlds"), "tok", &mut Clocks::new())
+        };
+        let (code, v) = post(
+            "/captains/cpt-f/orders".into(),
+            r#"{"verb":"travel","station":"Paws Truck Stop"}"#,
+        );
+        assert_eq!(code, 201, "{v}");
+        assert_eq!(v["placed"].as_array().map(Vec::len), Some(2), "{v}");
+        assert_eq!(v["placed"][0]["order"]["station"], "paws-truck-stop");
+        assert_eq!(v["placed"][0]["order"]["when"], "now");
+        assert_eq!(v["refused"].as_array().map(Vec::len), Some(0));
+        let (code, v) = post(
+            "/captains/cpt-f/orders".into(),
+            r#"{"verb":"hold","station":"paws-truck-stop"}"#,
+        );
+        assert_eq!(code, 201, "{v}");
+        for s in [&one, &two] {
+            let orders = ucf_pilot::store::load_orders(&s.dir);
+            assert_eq!(orders.len(), 2);
+            assert_eq!(
+                ucf_pilot::store::standing_course(&orders).as_deref(),
+                Some("hold at paws-truck-stop")
+            );
+            assert!(
+                orders[0].done_at.is_none(),
+                "the travel to the hold's own berth still files; the hold stands behind it"
+            );
+        }
+        assert!(
+            ucf_pilot::store::load_orders(&other.dir).is_empty(),
+            "Mara's hull is not Luke's to order"
+        );
+        // The verbs the feed refuses, by name.
+        let (code, v) = post(
+            format!("/ships/{}/orders", one.world.id),
+            r#"{"verb":"travel"}"#,
+        );
+        assert_eq!(code, 400);
+        assert_eq!(v["error"], "travel needs a station");
+        let (code, v) = post(
+            format!("/ships/{}/orders", one.world.id),
+            r#"{"verb":"dance"}"#,
+        );
+        assert_eq!(code, 400, "{v}");
+        let (code, v) = post("/captains/nobody/orders".into(), r#"{"verb":"hold"}"#);
+        assert_eq!(code, 404, "{v}");
+        // The rows count the course among the pending: the travel still to file and
+        // the hold standing behind it.
+        assert_eq!(ship_row(&one, &b.join("worlds"), 0)["orders"]["pending"], 2);
+        // "As you were": the course ends on every hull, recorded as the captain's act.
+        let (code, v) = post("/captains/cpt-f/orders".into(), r#"{"verb":"resume"}"#);
+        assert_eq!(code, 201, "{v}");
+        for s in [&one, &two] {
+            let orders = ucf_pilot::store::load_orders(&s.dir);
+            assert_eq!(ucf_pilot::store::standing_course(&orders), None);
+            assert_eq!(orders.last().map(|o| o.verb.as_str()), Some("resume"));
+            assert!(orders.iter().all(|o| !o.pending()));
+        }
+        // "Call paws": the tanker, as a standing order the pilot files at once.
+        let (code, v) = post(
+            format!("/ships/{}/orders", one.world.id),
+            r#"{"verb":"paws"}"#,
+        );
+        assert_eq!(code, 201, "{v}");
+        assert_eq!(v["order"]["when"], "now");
+    }
+
+    /// A named computer reads as named, and a hull with none reads as absent — the
+    /// third state, distinct from broken.
+    #[test]
+    fn named_and_absent_are_the_other_two_states() {
+        let b = base("states");
+        let root = b.join("worlds");
+        let named = hull(&b, "One", "Luke", "cpt-a");
+        let store = captain_store_by_id(&root, "cpt-a");
+        ucf_persona::persona::write(
+            &store,
+            &ucf_persona::persona::Persona {
+                persona_version: 2,
+                name: "Felix".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let bare = hull(&b, "Two", "Ann", "cpt-b");
+        assert_eq!(
+            ship_row(&named, &root, 0)["computer_state"],
+            json!({"state": "named", "name": "Felix"})
+        );
+        assert_eq!(
+            ship_row(&bare, &root, 0)["computer_state"],
+            json!({"state": "absent"})
+        );
+    }
+
+    /// Round 2, finding 4: a stale slug that names MORE than one migrated captain
+    /// gets a 410 that names them all and chooses none; one match keeps its location.
+    #[test]
+    fn an_ambiguous_stale_slug_names_both_and_picks_none() {
+        let b = base("ambiguous");
+        hull(&b, "One", "A/B", "cpt-1");
+        hull(&b, "Two", "A B", "cpt-2");
+        let (code, v) = get("/captains/a-b/brief", &b);
+        assert_eq!(code, 410, "{v}");
+        assert_eq!(v["candidates"].as_array().map(Vec::len), Some(2), "{v}");
+        assert!(v.get("captain_id").is_none(), "no captain chosen: {v}");
+
+        let b2 = base("unambiguous");
+        hull(&b2, "One", "A/B", "cpt-1");
+        let (code, v) = get("/captains/a-b/brief", &b2);
+        assert_eq!(code, 410);
+        assert_eq!(v["captain_id"], "cpt-1");
+        assert!(v.get("candidates").is_none());
+    }
+}

@@ -1,0 +1,41 @@
+# ucf-familiar — a ship's computer for the United Cat Foods exchange.
+#
+# Six crates and two binaries: `whisker`, the pilot that flies one hull from that
+# hull's own store, and `ucf-familiar`, the fleet CLI that commissions ships, leases
+# them their authority, supervises their pilots and serves a feed for a companion app.
+#
+# There is no background service, no database and no cloud account. The ship talks to
+# the exchange over HTTP and otherwise reads and writes plain files in its own store:
+# `worlds/<id>/` (ucf.env, journal.jsonl, orders.json, captain.json, holdings.json,
+# proposals.jsonl, approvals.jsonl, automations.json, whisker.pid), with `captains/`
+# beside it. That layout is deliberately stable — a live fleet is flying against it.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/wire",
+    "crates/persona",
+    "crates/node",
+    "crates/world",
+    "crates/pilot",
+    "crates/cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Ian Schlueter <ian@river.io>"]
+
+# Dependencies are kept deliberately minimal — a small, legible trust surface is part
+# of the promise that this cannot be turned against the people it serves.
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+# float_roundtrip: parse floats to the exact value their digits name. The default fast
+# parser can land 1 ULP off, and anything signed-then-reserialized (the lease) then fails
+# its own signature — one longitude cost a node 8 hours offline this way (2026-08-13).
+serde_json = { version = "1", features = ["float_roundtrip"] }
+ucf-wire = { path = "crates/wire" }
+ucf-persona = { path = "crates/persona" }
+ucf-node = { path = "crates/node" }
+ucf-world = { path = "crates/world" }
+ucf-pilot = { path = "crates/pilot" }

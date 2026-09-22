@@ -1,0 +1,10 @@
+[package]
+name = "ucf-persona"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "The ship's-computer persona — its name, gender, and voice — plus the small store/identity/boundary primitives the fleet reads."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

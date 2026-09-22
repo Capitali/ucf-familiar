@@ -1,0 +1,13 @@
+[package]
+name = "ucf-world"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Worlds are stores: the WorldInstance provisioning record, the typed bridge envelopes, and the signed expiring boundary lease."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+ucf-persona.workspace = true
+ucf-node.workspace = true
+getrandom = "0.2"

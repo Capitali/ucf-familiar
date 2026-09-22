@@ -1,0 +1,11 @@
+[package]
+name = "ucf-wire"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "The smallest HTTP(S) client that can talk to the UCF exchange: one blocking request, verifying TLS, a bounded response."
+
+[dependencies]
+# Blocking TLS, configured to VERIFY, because this wire carries a bearer token
+# instead of a signed payload (see tls.rs).
+rustls = { version = "0.23", features = ["ring"] }

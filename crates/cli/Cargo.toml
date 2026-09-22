@@ -1,0 +1,19 @@
+[package]
+name = "ucf-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "The fleet CLI for the UCF ship's computer."
+
+[[bin]]
+name = "ucf-familiar"
+path = "src/main.rs"
+
+[dependencies]
+ucf-persona.workspace = true
+ucf-node.workspace = true
+ucf-wire.workspace = true
+ucf-world.workspace = true
+ucf-pilot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
