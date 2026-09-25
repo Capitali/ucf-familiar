@@ -64,7 +64,7 @@ public struct TemplatedVoice {
         case "proposed", "proposal-lapsed": return 7
         case "traded", "position-opened", "load-closed", "outfitted", "trade-outcome", "fill", "paid-down", "frame-expanded", "order-done": return 6
         case "advice", "carry-blocked", "carry-refused", "engage-refused", "refit-refused", "book-corrected", "retargeted": return 5
-        case "acted", "engaged-drive", "carry-to-market", "unwedged-course", "adopted-held-contract", "freight", "order-underway", "hull-restored": return 4
+        case "acted", "engaged-drive", "carry-to-market", "unwedged-course", "adopted-held-contract", "freight", "order-underway", "hull-restored", "papers": return 4
         case "held-at-the-gate", "watch-begins", "forecast", "dispatch", "fleet-inbound", "order-waits", "under-orders", "tour": return 3
         case "holding", "merchant-idle", "outfit-idle", "awaiting-pending-actions", "awaiting-our-own-fold": return 0
         // Unknown: shown, neutrally — except that a word the runner ends in "-refused" is a
@@ -302,6 +302,10 @@ public struct TemplatedVoice {
             return "\(t(e)): I am not flying — this key now answers for \(s("hull")), not the ship this world means. The captain has moved aboard another of their hulls; nothing will be filed until they move back."
         case "hull-restored":
             return "\(t(e)): the captain is aboard again; I have the right ship and I am flying."
+        case "papers":
+            return s("papers") == "co-pilot"
+                ? "\(t(e)): none of the captain's own papers answer for this ship, so I fly it on its co-pilot's — freight only, no trading and no yard."
+                : "\(t(e)): flying on the captain's own papers."
         case "order-underway":
             return "\(t(e)): under way to \(s("to")) for your hold there, arrives t\(i("resolves"))"
         case "under-orders":

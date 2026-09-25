@@ -254,6 +254,66 @@ pub(crate) fn paired_ships(dir: &Path, root: &Path) -> Vec<Ship> {
         .collect()
 }
 
+/// One of `from`'s captain's OTHER hulls, by world id or by name as a captain
+/// would say it ("KBC-04" for "🐈 KBC-04 🐈‍⬛"): its durable actor and its name.
+/// Exactly one must match.
+pub(crate) fn resolve_sister(
+    fleet: &[Ship],
+    from: &Ship,
+    name: &str,
+) -> Result<(String, String), String> {
+    let fold = |t: &str| -> String {
+        t.chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect::<String>()
+            .to_lowercase()
+    };
+    let want = fold(name);
+    if want.is_empty() {
+        return Err(format!("\"{name}\" names no ship"));
+    }
+    let sisters: Vec<&Ship> = fleet
+        .iter()
+        .filter(|s| {
+            s.world.id != from.world.id
+                && !from.captain.captain_id.is_empty()
+                && s.captain.captain_id == from.captain.captain_id
+                && s.captain.server == from.captain.server
+        })
+        .collect();
+    let exact: Vec<&&Ship> = sisters
+        .iter()
+        .filter(|s| s.world.id == name || fold(&s.captain.hull_name) == want)
+        .collect();
+    let found: Vec<&&Ship> = if exact.is_empty() {
+        sisters
+            .iter()
+            .filter(|s| fold(&s.captain.hull_name).contains(&want))
+            .collect()
+    } else {
+        exact
+    };
+    match found.as_slice() {
+        [s] if !s.captain.hull_actor.is_empty() => {
+            Ok((s.captain.hull_actor.clone(), s.captain.hull_name.clone()))
+        }
+        [s] => Err(format!(
+            "{} has no hull actor on file — re-pair it before boarding",
+            s.captain.hull_name
+        )),
+        [] => Err(format!(
+            "no other ship of this captain is called \"{name}\""
+        )),
+        many => Err(format!(
+            "\"{name}\" could be {}",
+            many.iter()
+                .map(|s| s.captain.hull_name.as_str())
+                .collect::<Vec<_>>()
+                .join(" or ")
+        )),
+    }
+}
+
 pub(crate) fn last_journal_line(ship_dir: &Path) -> Option<Value> {
     let text = std::fs::read_to_string(ship_dir.join("journal.jsonl")).ok()?;
     text.lines()
@@ -2022,10 +2082,13 @@ pub fn cmd_fleet(args: &[String]) -> ExitCode {
                 eprintln!("fleet order <world> repair|refuel|payLease|travel|hold [--station <id>] [--when next-docking|now] [--amount N] [--by <who>]");
                 return ExitCode::FAILURE;
             };
-            if !["repair", "refuel", "payLease", "paws", "travel", "hold"].contains(&verb.as_str())
+            if ![
+                "repair", "refuel", "payLease", "paws", "travel", "hold", "board",
+            ]
+            .contains(&verb.as_str())
             {
                 eprintln!(
-                    "fleet order: the verbs a captain can order are repair, refuel, payLease, paws, travel, hold"
+                    "fleet order: the verbs a captain can order are repair, refuel, payLease, paws, travel, hold, board"
                 );
                 return ExitCode::FAILURE;
             }
@@ -2056,6 +2119,26 @@ pub fn cmd_fleet(args: &[String]) -> ExitCode {
                 eprintln!("fleet order: payLease needs --amount N");
                 return ExitCode::FAILURE;
             }
+            let (ship, ship_name) = if verb.as_str() == "board" {
+                let Some(name) = f.get("ship") else {
+                    eprintln!("fleet order: board needs --ship <name>");
+                    return ExitCode::FAILURE;
+                };
+                let fleet = paired_ships(&dir, &root);
+                let Some(from) = fleet.iter().find(|s| s.world.id == id.as_str()) else {
+                    eprintln!("fleet order: no paired ship {id}");
+                    return ExitCode::FAILURE;
+                };
+                match resolve_sister(&fleet, from, name) {
+                    Ok((a, h)) => (Some(a), Some(h)),
+                    Err(e) => {
+                        eprintln!("fleet order: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            } else {
+                (None, None)
+            };
             let orders = ucf_pilot::store::load_orders(&ship_dir);
             let order = ucf_pilot::store::Order {
                 id: format!("ord-{}-{}", super::now_secs(), orders.len() + 1),
@@ -2063,6 +2146,8 @@ pub fn cmd_fleet(args: &[String]) -> ExitCode {
                 station,
                 when: when.clone(),
                 amount,
+                ship,
+                ship_name,
                 by: f
                     .get("by")
                     .cloned()
@@ -2383,6 +2468,7 @@ pub fn cmd_fleet(args: &[String]) -> ExitCode {
             }
         }
         // ── names: everything the fleet has ever called anyone ─────────────────
+        "papers" => crate::papers::run(&dir, &root, &f),
         "names" => {
             if f.contains_key("backfill") {
                 match backfill_names(&dir, &root) {
@@ -2803,7 +2889,7 @@ pub fn cmd_fleet(args: &[String]) -> ExitCode {
             ExitCode::SUCCESS
         }
         other => {
-            eprintln!("fleet: unknown subcommand `{other}` — pair | unpair | status | captains | economy | order | orders | names | adopt-ids | rename | hull | choose | run | serve");
+            eprintln!("fleet: unknown subcommand `{other}` — pair | unpair | status | captains | economy | order | orders | names | papers | adopt-ids | rename | hull | choose | run | serve");
             ExitCode::FAILURE
         }
     }

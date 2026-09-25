@@ -40,7 +40,8 @@ fn now_secs() -> i64 {
 /// client: verifying TLS, plain http only to loopback, bounded reads.
 struct Wire {
     base: String,
-    key: String,
+    /// The papers this fold flies on — swapped per fold by [`select_papers`].
+    key: RefCell<String>,
     /// Route costs already asked of the exchange, (from, to) → (asked-at, fuel). The
     /// merchant asks about every good's best buyer each docked fold; the lane graph
     /// does not move on that timescale, and the ship has ONE key that the exchange
@@ -101,7 +102,10 @@ impl Wire {
 
     fn auth(&self) -> Vec<(String, String)> {
         vec![
-            ("Authorization".into(), format!("Bearer {}", self.key)),
+            (
+                "Authorization".into(),
+                format!("Bearer {}", self.key.borrow()),
+            ),
             ("X-UCF-App".into(), "familiar-whisker".into()),
         ]
     }
@@ -117,6 +121,10 @@ impl Wire {
             ));
         }
         serde_json::from_slice(&resp.body).map_err(|e| format!("GET {path}: {e}"))
+    }
+
+    fn set_key(&self, secret: &str) {
+        *self.key.borrow_mut() = secret.to_string();
     }
 
     /// A GET for a cache: `Err(true)` when the exchange ANSWERED and said no, which is
@@ -139,6 +147,133 @@ impl Wire {
 /// pump unreachable for half an hour at a time.
 fn exchange_said_no(status: u16) -> bool {
     (400..500).contains(&status) && status != 429
+}
+
+/// One key a hull might fly on, and whether it carries the captain's own papers
+/// (`act`) — `None` until `/v1/profile` has said.
+struct Candidate {
+    secret: String,
+    key_id: String,
+    captain: Option<bool>,
+}
+
+/// Every key that could answer for the hull in `ship_dir`: its own `ucf.env` pair
+/// and every key on the captain's record for the same exchange. Order is the
+/// preference among equals — the hull's own first.
+fn candidate_papers(ship_dir: &Path, server: &str) -> Vec<Candidate> {
+    let env = ship_dir.join("ucf.env");
+    let mut out: Vec<Candidate> = Vec::new();
+    let mut push = |secret: String, captain: Option<bool>| {
+        if !secret.is_empty() && !out.iter().any(|c| c.secret == secret) {
+            let key_id = secret.trim_start_matches("ucfk_").chars().take(8).collect();
+            out.push(Candidate {
+                secret,
+                key_id,
+                captain,
+            });
+        }
+    };
+    if let Some(k) = store::env_value(&env, "UCF_KEY") {
+        push(k, None);
+    }
+    let captain_id = std::fs::read_to_string(ship_dir.join("captain.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v.get("captain_id")?.as_str().map(String::from))
+        .unwrap_or_default();
+    if let Some(dir) = store::captain_dir(ship_dir, &captain_id) {
+        for p in store::load_papers(&dir).keys {
+            if p.server.trim_end_matches('/') == server.trim_end_matches('/') {
+                let captain = p.is_captain();
+                push(p.secret, Some(captain));
+            }
+        }
+    }
+    if let Some(k) = store::env_value(&env, store::COPILOT_KEY_VAR) {
+        push(k, Some(false));
+    }
+    out
+}
+
+/// What the fold flies on.
+enum Selection {
+    /// `me` as the chosen key answers it; `captain` = the captain's own papers.
+    Flying {
+        me: Value,
+        key_id: String,
+        captain: bool,
+    },
+    /// No key we hold answers for this hull; `me` is what the first answered.
+    Hold {
+        me: Value,
+    },
+    Unreachable(String),
+}
+
+/// Ask each candidate which hull it answers for and pick with [`store::pick_papers`].
+/// A hull with no durable actor on file predates ship changes: its own key flies
+/// it, as before. The wire is left holding the chosen key.
+fn select_papers(wire: &Wire, candidates: &mut [Candidate], want: Option<&str>) -> Selection {
+    let mut answers: Vec<(bool, String)> = Vec::new();
+    let mut mes: Vec<Value> = Vec::new();
+    for (i, c) in candidates.iter_mut().enumerate() {
+        wire.set_key(&c.secret);
+        if c.captain.is_none() {
+            c.captain = wire.get("/v1/profile").ok().map(|p| {
+                p.get("scopes")
+                    .and_then(Value::as_array)
+                    .is_some_and(|a| a.iter().any(|s| s.as_str() == Some("act")))
+            });
+        }
+        let me = match wire.get("/v1/me") {
+            Ok(v) => v,
+            Err(e) if i == 0 => return Selection::Unreachable(e),
+            Err(_) => Value::Null,
+        };
+        let actor = me
+            .get("actor")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let captain = c.captain.unwrap_or(false);
+        // The hull's own key needs no comparison when there is nothing to compare.
+        if want.is_none() && i == 0 {
+            return Selection::Flying {
+                me,
+                key_id: c.key_id.clone(),
+                captain,
+            };
+        }
+        // The captain's own papers answering for this hull win outright.
+        if captain && Some(actor.as_str()) == want {
+            return Selection::Flying {
+                me,
+                key_id: c.key_id.clone(),
+                captain,
+            };
+        }
+        answers.push((captain, actor));
+        mes.push(me);
+    }
+    let refs: Vec<(bool, &str)> = answers.iter().map(|(c, a)| (*c, a.as_str())).collect();
+    match want.and_then(|w| store::pick_papers(w, &refs)) {
+        Some(i) => {
+            wire.set_key(&candidates[i].secret);
+            Selection::Flying {
+                me: mes.swap_remove(i),
+                key_id: candidates[i].key_id.clone(),
+                captain: refs[i].0,
+            }
+        }
+        None => {
+            if let Some(c) = candidates.first() {
+                wire.set_key(&c.secret);
+            }
+            Selection::Hold {
+                me: mes.into_iter().next().unwrap_or(Value::Null),
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -323,12 +458,21 @@ fn fleet_leases(ship_dir: &Path) -> Vec<outfit::Sister> {
         };
         let sister = Wire {
             base: server.trim_end_matches('/').to_string(),
-            key,
+            key: RefCell::new(key),
             routes: RefCell::new(HashMap::new()),
             rung_quotes: RefCell::new(HashMap::new()),
         };
-        let Ok(me) = sister.get("/v1/me") else {
-            continue;
+        // Read the sister through whichever papers answer for HER hull: after a ship
+        // change her own key answers for the hull the captain stands on, which would
+        // count that one twice and her not at all.
+        let want = theirs
+            .get("hull_actor")
+            .and_then(Value::as_str)
+            .filter(|a| !a.is_empty());
+        let mut papers = candidate_papers(&d, server);
+        let me = match select_papers(&sister, &mut papers, want) {
+            Selection::Flying { me, .. } => me,
+            _ => continue,
         };
         let Some(actor) = me.get("actor").and_then(Value::as_str) else {
             continue;
@@ -587,7 +731,7 @@ fn main() -> ExitCode {
     };
     let wire = Wire {
         base: server.trim_end_matches('/').to_string(),
-        key,
+        key: RefCell::new(key),
         routes: RefCell::new(HashMap::new()),
         rung_quotes: RefCell::new(HashMap::new()),
     };
@@ -682,6 +826,8 @@ fn main() -> ExitCode {
     let mut last_carry_block = String::new();
     // The last refusal of the travel a standing hold needs, journaled once per reason.
     let mut last_hold_travel_refusal = String::new();
+    // The last reason a ship change was held back, journaled once per reason.
+    let mut last_board_wait = String::new();
     let mut last_merchant_idle = String::new();
     // A filed trade whose fold has not been read back from the receipt trail yet.
     let mut pending_trade: Option<PendingTrade> = None;
@@ -775,6 +921,12 @@ fn main() -> ExitCode {
                    "automation": "verbs", "why": format!("this key's papers cannot file {denied:?}")}),
         );
     }
+    // The captain's own papers carry every verb; a co-pilot's, `COPILOT_DENIED` less.
+    let captain_denied: Vec<String> = Vec::new();
+    let mut candidates: Vec<Candidate> = Vec::new();
+    let mut flying_on = String::new();
+    // On a co-pilot's papers the merchant and the yard stand down: neither can file.
+    let mut on_copilot = false;
     let recipes = reference
         .as_ref()
         .map(chain::parse_recipes)
@@ -930,15 +1082,68 @@ fn main() -> ExitCode {
                 continue;
             }
         };
-        let me = match wire.get("/v1/me") {
-            Ok(v) => v,
-            Err(e) => {
+        // WHOSE PAPERS FLY THIS FOLD. The captain's own key where it answers for this
+        // hull — every verb; else the hull's co-pilot — freight only; else nobody,
+        // and we hold. Re-read each fold, so a ship change or newly signed papers
+        // take effect without a restart; what each key is stays remembered.
+        {
+            let fresh = candidate_papers(&ship_dir, &server);
+            let known: HashMap<String, Option<bool>> = candidates
+                .iter()
+                .map(|c| (c.secret.clone(), c.captain))
+                .collect();
+            candidates = fresh
+                .into_iter()
+                .map(|mut c| {
+                    if c.captain.is_none() {
+                        c.captain = known.get(&c.secret).copied().flatten();
+                    }
+                    c
+                })
+                .collect();
+        }
+        let me = match select_papers(&wire, &mut candidates, expected_actor.as_deref()) {
+            Selection::Flying {
+                me,
+                key_id,
+                captain,
+            } => {
+                if key_id != flying_on {
+                    denied = if captain {
+                        captain_denied.clone()
+                    } else {
+                        store::COPILOT_DENIED
+                            .iter()
+                            .map(|v| v.to_string())
+                            .collect()
+                    };
+                    journal(
+                        &ship_dir,
+                        json!({"at": now_secs(), "event": "papers", "key": key_id,
+                        "papers": if captain { "captain" } else { "co-pilot" },
+                        "why": if captain {
+                            "the captain's own papers answer for this hull: every verb"
+                        } else {
+                            "none of the captain's own papers answer for this hull, so it \
+                             flies on its co-pilot's — freight only, no trading, no yard"
+                        }}),
+                    );
+                    flying_on = key_id;
+                    on_copilot = !captain;
+                }
+                me
+            }
+            Selection::Unreachable(e) => {
                 journal(
                     &ship_dir,
                     json!({"at": now, "event": "exchange-unreachable", "why": e}),
                 );
                 std::thread::sleep(Duration::from_secs(30));
                 continue;
+            }
+            Selection::Hold { me } => {
+                flying_on.clear();
+                me
             }
         };
         // The hull under us is still ours, or we do nothing (see `expected_actor`).
@@ -1433,6 +1638,7 @@ fn main() -> ExitCode {
         // merchant took 3,800 for bluefin on the fold that could have bought the
         // drive-tune). One of each ever, so this fires rarely.
         if outfits
+            && !on_copilot
             && tick >= pending_until
             && pending_trade.is_none()
             && active.is_none()
@@ -1982,7 +2188,56 @@ fn main() -> ExitCode {
                 }
                 // In flight: a travel filed now would be refused ("already under way");
                 // it waits for the berth, as the engage logic below does.
-                if verb == "travel" && ship.in_flight {
+                // A ship change (metal#100) waits — never gives up — until it can
+                // fold: the captain's own papers flying this hull (a co-pilot cannot
+                // file it), and the hull boarded berthed at this same station. The
+                // fold refuses otherwise, and a refusal would end the order.
+                let board_wait: Option<String> = if verb == "board" {
+                    let name = o
+                        .ship_name
+                        .clone()
+                        .unwrap_or_else(|| "the other ship".into());
+                    let target = o.ship.clone().unwrap_or_default();
+                    if denied.iter().any(|d| d == "transferCaptain") {
+                        Some(
+                            "the captain is not aboard this hull; a ship change is filed on \
+                             their own papers from the hull they stand on"
+                                .into(),
+                        )
+                    } else {
+                        let there = wire.get("/v1/captain").ok().and_then(|c| {
+                            c.get("fleet")?
+                                .as_array()?
+                                .iter()
+                                .find(|h| h.get("actorId").and_then(Value::as_str) == Some(&target))
+                                .map(|h| h.get("docked").and_then(Value::as_str).map(String::from))
+                        });
+                        match there {
+                            Some(Some(st)) if Some(&st) == ship.docked.as_ref() => None,
+                            Some(Some(st)) => Some(format!(
+                                "{name} is berthed at {st}, not here — rendezvous first"
+                            )),
+                            Some(None) => Some(format!(
+                                "{name} is under way; both hulls must be berthed at one station"
+                            )),
+                            // The register did not answer: let the fold judge.
+                            None => None,
+                        }
+                    }
+                } else {
+                    None
+                };
+                if let Some(why) = board_wait {
+                    let key = format!("{}|{why}", o.id);
+                    if key != last_board_wait {
+                        journal(
+                            &ship_dir,
+                            json!({"at": now, "tick": tick, "event": "order-waits", "order": o.id,
+                                   "verb": verb, "why": why}),
+                        );
+                        last_board_wait = key;
+                    }
+                } else if verb == "travel" && ship.in_flight {
                     // nothing this fold; the order stays pending and the course holds
                 } else {
                     match o.action() {
@@ -2058,7 +2313,7 @@ fn main() -> ExitCode {
         // goods never reached its own orders: Kibble Klipper at foxys-diner sat on
         // "travel to tuna-prime" for 60 ticks while KBC-03 and KBC-04, holding nothing
         // to sell, obeyed. The captain's word is read first, whatever the hold carries.
-        if trades && tick >= pending_until {
+        if trades && !on_copilot && tick >= pending_until {
             // 1. Read back the last trade's fold from the receipt trail: the outcome is
             //    a market fact recorded in the world (filled, or a named refusal), never
             //    an HTTP error — and the refusal that matters names the clock.

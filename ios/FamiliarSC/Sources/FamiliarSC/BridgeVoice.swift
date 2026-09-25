@@ -591,7 +591,7 @@ struct GiveOrderTool: Tool {
 
     @Generable
     struct Arguments {
-        @Guide(description: "travel, hold, repair, refuel, payLease, callPaws (call the tanker / allow the pilot to call paws), or resume (as you were — lift the hold).", .anyOf(["travel", "hold", "repair", "refuel", "payLease", "callPaws", "resume"]))
+        @Guide(description: "travel, hold, repair, refuel, payLease, callPaws (call the tanker / allow the pilot to call paws), resume (as you were — lift the hold), or board (the captain changes ship to another of their hulls).", .anyOf(["travel", "hold", "repair", "refuel", "payLease", "callPaws", "resume", "board"]))
         var verb: String
         @Guide(description: "The station exactly as the captain named it, or empty when none was named.")
         var station: String
@@ -601,13 +601,17 @@ struct GiveOrderTool: Tool {
         var when: String
         @Guide(description: "For payLease or a partial refuel: the amount; 0 otherwise.")
         var amount: Int
+        @Guide(description: "For board: the ship the captain steps aboard, exactly as named; empty otherwise.")
+        var ship: String
     }
 
     func call(arguments: Arguments) async throws -> String {
-        guard let verb = OrderRequest.Verb(rawValue: arguments.verb) else { return "The verb must be travel, hold, repair, refuel, payLease, callPaws or resume." }
+        guard let verb = OrderRequest.Verb(rawValue: arguments.verb) else { return "The verb must be travel, hold, repair, refuel, payLease, callPaws, resume or board." }
+        if verb == .board, arguments.ship.trimmingCharacters(in: .whitespaces).isEmpty { return "A ship change needs the ship the captain named." }
         if verb == .travel, arguments.station.trimmingCharacters(in: .whitespaces).isEmpty { return "A travel order needs the station the captain named." }
         if verb == .payLease, arguments.amount <= 0 { return "A lease payment needs the amount the captain named." }
         let order = OrderRequest(verb: verb, station: arguments.station, when: arguments.when, amount: arguments.amount > 0 ? Int64(arguments.amount) : nil,
+                                 ship: arguments.ship,
                                  scope: OrderRequest.Scope(rawValue: arguments.scope) ?? .thisHull)
         voice.record([order])
         return "Order noted: \(order.sentence). Confirm it to the captain in one sentence; it files when they tap."

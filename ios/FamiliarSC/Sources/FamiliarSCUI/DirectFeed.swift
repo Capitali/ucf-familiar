@@ -524,6 +524,8 @@ public struct DirectFeed: ShipsFeed, CaptainActs {
             return "Filed: the tanker is called (\(ack.actionId))" + (ack.resolvesAtTick.map { " — the fold answers at t\($0)" } ?? "") + "."
         case .repair, .refuel, .payLease, .resume:
             throw FeedError.needsHost("standing orders wait for a pilot on a fleet host; in direct mode confirm the act from the bridge instead")
+        case .board:
+            throw FeedError.needsHost("a ship change waits for both hulls to share a berth, which a pilot on a fleet host watches for")
         }
     }
 

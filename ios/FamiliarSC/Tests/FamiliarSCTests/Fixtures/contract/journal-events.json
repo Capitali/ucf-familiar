@@ -24,6 +24,7 @@
     "holding",
     "hull-changed",
     "hull-restored",
+    "papers",
     "load-closed",
     "merchant-idle",
     "order-done",

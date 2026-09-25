@@ -22,6 +22,24 @@ final class OrdersTests: XCTestCase {
         XCTAssertEqual(short.map(\.verb), [.travel]); XCTAssertEqual(short[0].station, "paws truck stop"); XCTAssertEqual(short[0].scope, .thisHull, "'lol ships' is not 'all ships'; the fleet needs saying")
     }
 
+    /// metal#100: "board KBC-04" is a ship change, given on this hull — never a travel to a
+    /// station called KBC-04, and never the fleet's.
+    func testBoardingIsAShipChangeOnThisHull() throws {
+        for said in ["Felix, board KBC-04", "go aboard kbc-04", "change ship to KBC-04", "transfer me to KBC-04 please", "move me to kbc-04"] {
+            let orders = try XCTUnwrap(OrderParser.parse(said), said)
+            XCTAssertEqual(orders.map(\.verb), [.board], said)
+            XCTAssertEqual(orders[0].ship, "kbc-04", said)
+            XCTAssertEqual(orders[0].scope, .thisHull, said)
+            XCTAssertEqual(orders[0].when, "next-docking", said)
+            XCTAssertEqual(orders[0].body["ship"], .string("kbc-04"), said)
+        }
+        let fleet = try XCTUnwrap(OrderParser.parse("all ships board kbc-04"))
+        XCTAssertEqual(fleet[0].scope, .thisHull, "a ship change is one hull's act")
+        XCTAssertTrue(OrderParser.readback(fleet).contains("same station"))
+        // A trip is still a trip.
+        XCTAssertEqual(OrderParser.parse("move to tuna prime")?.map(\.verb), [.travel])
+    }
+
     /// 2026-09-20: "rendezvous at tuna-prime" filed a travel and no hold, so the first hull to
     /// arrive left again. A rendezvous is a travel and a hold, for the fleet.
     func testARendezvousIsATravelAndAHoldForTheFleet() throws {

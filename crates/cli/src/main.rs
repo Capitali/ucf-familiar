@@ -17,6 +17,7 @@ mod autonomy_cmd;
 mod economy;
 mod fleet;
 mod fleet_serve;
+mod papers;
 
 use std::collections::HashMap;
 use std::process::ExitCode;

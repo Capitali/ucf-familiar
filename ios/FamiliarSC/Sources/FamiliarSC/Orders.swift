@@ -17,6 +17,9 @@ public struct OrderRequest: Equatable, Sendable, Identifiable {
         case callPaws
         /// "As you were": the standing course ends and the pilot's doctrine flies again.
         case resume
+        /// The captain changes ship (metal#100): given on the hull they leave, filed at a
+        /// berth both hulls share. The money aboard goes with them.
+        case board
         /// The verb as the host's `orders.json` spells it.
         public var wire: String { self == .callPaws ? "paws" : rawValue }
     }
@@ -31,15 +34,19 @@ public struct OrderRequest: Equatable, Sendable, Identifiable {
     /// `now` | `next-docking`; the course verbs are always `now`.
     public var when: String
     public var amount: Int64?
+    /// `board`: the ship the captain steps aboard, as named; the host resolves it.
+    public var ship: String?
     public var scope: Scope
-    public var id: String { "\(scope.rawValue):\(verb.rawValue):\(station ?? ""):\(when):\(amount ?? 0)" }
+    public var id: String { "\(scope.rawValue):\(verb.rawValue):\(station ?? ""):\(when):\(amount ?? 0):\(ship ?? "")" }
 
-    public init(verb: Verb, station: String? = nil, when: String? = nil, amount: Int64? = nil, scope: Scope = .thisHull) {
+    public init(verb: Verb, station: String? = nil, when: String? = nil, amount: Int64? = nil, ship: String? = nil, scope: Scope = .thisHull) {
         self.verb = verb
         self.station = station?.trimmingCharacters(in: .whitespaces).nilIfEmpty
         self.when = when ?? ([.travel, .hold, .resume, .callPaws].contains(verb) ? "now" : "next-docking")
         self.amount = amount
-        self.scope = scope
+        self.ship = ship?.trimmingCharacters(in: .whitespaces).nilIfEmpty
+        // A ship change is one hull's act: the hull the captain leaves.
+        self.scope = verb == .board ? .thisHull : scope
     }
 
     /// The wire body the host takes on `POST …/orders`.
@@ -47,6 +54,7 @@ public struct OrderRequest: Equatable, Sendable, Identifiable {
         var b: [String: JSONValue] = ["verb": .string(verb.wire), "when": .string(when)]
         if let station { b["station"] = .string(station) }
         if let amount { b["amount"] = .number(Double(amount)) }
+        if let ship { b["ship"] = .string(ship) }
         return b
     }
 
@@ -61,6 +69,7 @@ public struct OrderRequest: Equatable, Sendable, Identifiable {
         case .payLease: return "\(who): pay ℳ\(amount ?? 0) down on the lease"
         case .callPaws: return "\(who): call the tanker (paws) now"
         case .resume: return "\(who): as you were — the standing course ends and the pilot flies its own doctrine again"
+        case .board: return "the captain leaves this hull for \(ship ?? "?") at the next berth they share — the money aboard goes too"
         }
     }
 }
@@ -105,6 +114,16 @@ public enum OrderParser {
             if matches(c, #"\b(resume|carry on|as you were|back to (?:work|it|business|normal)|(?:return|go back|get back) to (?:normal|regular|usual|routine)(?: operations?| duty| business)?|normal operations|belay (?:that|the hold|the orders?)|cancel (?:the |that |all )?(?:hold|orders?|course)|lift the hold|release (?:the )?hold|stand down(?: the hold)?|free to (?:fly|trade|work)|go about your business|fly (?:as|how) you (?:see fit|like|will))\b"#) {
                 out.append(OrderRequest(verb: .resume, scope: scope))
                 continue
+            }
+            // A ship change: "board KBC-04", "go aboard KBC-04", "change ship to KBC-04",
+            // "transfer me to KBC-04". Read before the travel below, which would take
+            // "move me to KBC-04" for a course to a station.
+            if let name = capture(c, #"\b(?:board|go aboard|step aboard|come aboard|change ships? to|switch ships? to|transfer (?:me|the captain|myself) to|move (?:me|the captain|myself) (?:aboard|to))\s+(?:the\s+)?([a-z0-9][a-z0-9' -]*?)(?=\s+(?:and|then|now|please|at|when)\b|\s*$)"#) {
+                let n = name.trimmingCharacters(in: .whitespaces)
+                if !n.isEmpty {
+                    out.append(OrderRequest(verb: .board, ship: n))
+                    continue
+                }
             }
             // The tanker: "call paws", "allow / let the pilot (to) call paws", "send for the tanker".
             if matches(c, #"\b(call|send for|request|summon|allow|let|permit|authori[sz]e)\b"#) && matches(c, #"\b(paws|tanker|rescue)\b"#) && !matches(c, #"\b(don't|do not|never|no longer)\b"#) {
@@ -173,6 +192,9 @@ public enum OrderParser {
         if orders.allSatisfy({ $0.verb == .resume }) {
             return "Order read — \(read). Tap FILE and the standing course is lifted; the doctrine takes the next fold."
         }
+        if orders.allSatisfy({ $0.verb == .board }) {
+            return "Order read — \(read). Tap FILE and the pilot files it once both ships are berthed at the same station; until then it waits and says why."
+        }
         if orders.allSatisfy({ $0.verb == .callPaws }) {
             return "Order read — \(read). Tap FILE and the pilot calls the tanker under your authority; the fee lands on the ledger."
         }
@@ -180,7 +202,7 @@ public enum OrderParser {
     }
 
     /// Words that open an order and are never a name.
-    static let orderWords: Set<String> = ["resume", "hold", "wait", "stay", "stop", "repair", "refuel", "go", "bring", "take", "send", "fly", "move", "head", "proceed", "travel", "return", "call", "pay", "belay", "cancel"]
+    static let orderWords: Set<String> = ["resume", "hold", "wait", "stay", "stop", "repair", "refuel", "go", "bring", "take", "send", "fly", "move", "head", "proceed", "travel", "return", "call", "pay", "belay", "cancel", "board"]
 
     static func matches(_ s: String, _ pattern: String) -> Bool {
         s.range(of: pattern, options: .regularExpression) != nil

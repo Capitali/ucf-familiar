@@ -101,6 +101,241 @@ pub fn env_value(path: &Path, key: &str) -> Option<String> {
     None
 }
 
+/// The hull's co-pilot key, beside the captain's own `UCF_KEY` in `ucf.env`.
+pub const COPILOT_KEY_VAR: &str = "UCF_COPILOT_KEY";
+
+/// Every verb a co-pilot key cannot file. The exchange lets a co-pilot travel, book,
+/// cancel a booking, collect, refuel and engage (`copilotVerbs`), and nothing else:
+/// no trading, no yard, no crew, no lease, no tanker, and no ship change.
+pub const COPILOT_DENIED: [&str; 10] = [
+    "repair",
+    "paws",
+    "refit",
+    "payLease",
+    "expandFrame",
+    "buy",
+    "sell",
+    "hire",
+    "dismiss",
+    "transferCaptain",
+];
+
+/// The human's papers: every key a captain holds on an exchange, filed on the
+/// captain's record (`captains/<id>/papers.json`, 0600 like `ucf.env`).
+///
+/// A captain's OWN keys belong to the person, not to a hull: after a ship change
+/// (metal#100) every one of them answers for the hull the captain stands on. A
+/// co-pilot key belongs to its hull and stays with it. So which key flies a hull is
+/// decided per fold, by asking — never by which directory a key was written into.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CaptainPapers {
+    #[serde(default)]
+    pub exchange_captain_id: String,
+    #[serde(default)]
+    pub keys: Vec<Paper>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Paper {
+    pub server: String,
+    /// The public id (first 8 hex of the secret), for display and revocation.
+    pub key_id: String,
+    pub secret: String,
+    /// `captain` (`act` scope) or `copilot` (`auto:freight`).
+    pub kind: String,
+    /// The hull the key was issued for — a co-pilot's for good, a captain key's
+    /// only until the captain changes ship.
+    #[serde(default)]
+    pub hull_actor: String,
+    #[serde(default)]
+    pub hull: String,
+    #[serde(default)]
+    pub filed_at: i64,
+}
+
+impl Paper {
+    pub fn is_captain(&self) -> bool {
+        self.kind == "captain"
+    }
+}
+
+pub const PAPERS_FILE: &str = "papers.json";
+
+/// The human's record directory for a ship store: `<root>/captains/<id>`, where the
+/// ship store is `<root>/worlds/<world>`.
+pub fn captain_dir(ship_dir: &Path, captain_id: &str) -> Option<std::path::PathBuf> {
+    if captain_id.is_empty() {
+        return None;
+    }
+    Some(
+        ship_dir
+            .parent()?
+            .parent()?
+            .join("captains")
+            .join(captain_id),
+    )
+}
+
+pub fn load_papers(captain_dir: &Path) -> CaptainPapers {
+    std::fs::read_to_string(captain_dir.join(PAPERS_FILE))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+/// Written whole, through a temp file, at 0600: it carries secrets.
+pub fn save_papers(captain_dir: &Path, papers: &CaptainPapers) -> std::io::Result<()> {
+    std::fs::create_dir_all(captain_dir)?;
+    let bytes = serde_json::to_vec_pretty(papers)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    let tmp = captain_dir.join(format!("{PAPERS_FILE}.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::rename(&tmp, captain_dir.join(PAPERS_FILE))
+}
+
+/// File a key on the record, replacing any entry with the same key id.
+pub fn file_paper(papers: &mut CaptainPapers, paper: Paper) {
+    papers.keys.retain(|p| p.key_id != paper.key_id);
+    papers.keys.push(paper);
+}
+
+/// Which of the keys flies the hull `want`, given what each answered for this fold:
+/// `(is_captain_key, actor it answers for)`. The captain's own papers first — they
+/// carry every verb — then the hull's co-pilot; `None` is a hold: nobody we hold a
+/// key for may act for this hull right now.
+pub fn pick_papers(want: &str, answers: &[(bool, &str)]) -> Option<usize> {
+    let find = |captain: bool| {
+        answers
+            .iter()
+            .position(|(is_captain, actor)| *is_captain == captain && *actor == want)
+    };
+    find(true).or_else(|| find(false))
+}
+
+#[cfg(test)]
+mod papers_tests {
+    use super::*;
+
+    #[test]
+    fn the_captains_key_flies_the_hull_the_captain_is_aboard() {
+        // Before any ship change each captain key answers for its own hull.
+        let answers = [
+            (true, "player:kk"),
+            (true, "player:kbc3"),
+            (false, "player:kbc4"),
+        ];
+        assert_eq!(pick_papers("player:kk", &answers), Some(0));
+        assert_eq!(pick_papers("player:kbc3", &answers), Some(1));
+        assert_eq!(
+            pick_papers("player:kbc4", &answers),
+            Some(2),
+            "its co-pilot"
+        );
+    }
+
+    #[test]
+    fn after_a_ship_change_the_captain_flies_where_they_stand() {
+        // The captain boarded KBC-04: both captain keys now answer for it.
+        let answers = [
+            (true, "player:kbc4"),
+            (true, "player:kbc4"),
+            (false, "player:kk"),
+        ];
+        assert_eq!(
+            pick_papers("player:kbc4", &answers),
+            Some(0),
+            "full papers aboard"
+        );
+        assert_eq!(
+            pick_papers("player:kk", &answers),
+            Some(2),
+            "KK on its co-pilot"
+        );
+        assert_eq!(
+            pick_papers("player:kbc3", &answers),
+            None,
+            "no co-pilot: hold"
+        );
+    }
+
+    #[test]
+    fn papers_round_trip_at_0600() {
+        let d = std::env::temp_dir().join(format!("papers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let mut p = CaptainPapers::default();
+        let paper = |id: &str, kind: &str| Paper {
+            server: "s".into(),
+            key_id: id.into(),
+            secret: format!("ucfk_{id}"),
+            kind: kind.into(),
+            hull_actor: String::new(),
+            hull: String::new(),
+            filed_at: 0,
+        };
+        file_paper(&mut p, paper("aaaa", "captain"));
+        file_paper(&mut p, paper("aaaa", "copilot"));
+        assert_eq!(p.keys.len(), 1, "one entry per key id");
+        save_papers(&d, &p).unwrap();
+        assert_eq!(load_papers(&d), p);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(d.join(PAPERS_FILE))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn board_files_a_ship_change_to_the_hull_named() {
+        let o = Order {
+            id: "o1".into(),
+            verb: "board".into(),
+            station: None,
+            when: "next-docking".into(),
+            amount: None,
+            ship: Some("player:kbc4".into()),
+            ship_name: Some("KBC-04".into()),
+            by: "Luke".into(),
+            at: 0,
+            done_at: None,
+            waits: None,
+        };
+        assert_eq!(
+            o.action(),
+            Some(serde_json::json!({"type": "transferCaptain", "to": "player:kbc4"}))
+        );
+        assert!(!o.ready(false), "under way: a ship change needs a berth");
+        assert!(o.ready(true));
+        assert!(!o.is_course(), "boarding does not supersede the course");
+    }
+
+    #[test]
+    fn a_copilot_files_none_of_the_captains_verbs() {
+        for v in [
+            "travel",
+            "book",
+            "cancelBooking",
+            "collect",
+            "refuel",
+            "engage",
+        ] {
+            assert!(!COPILOT_DENIED.contains(&v), "{v} is a co-pilot verb");
+        }
+        for v in ["buy", "sell", "repair", "paws", "transferCaptain"] {
+            assert!(COPILOT_DENIED.contains(&v), "{v} is the captain's");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,6 +413,12 @@ pub struct Order {
     pub when: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub amount: Option<i64>,
+    /// `board`: the hull the captain steps aboard — its durable actor id — and its
+    /// name as the captain said it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ship: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ship_name: Option<String>,
     pub by: String,
     pub at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -225,6 +466,12 @@ impl Order {
             // The tanker, on the captain's word: the pilot's own doctrine calls it only
             // under --allow-paws; an order is the captain calling it.
             "paws" => Some(serde_json::json!({"type": "paws"})),
+            // The captain changes ship (metal#100): filed on the papers of the hull
+            // being left, whose money goes with them.
+            "board" => self
+                .ship
+                .as_ref()
+                .map(|to| serde_json::json!({"type": "transferCaptain", "to": to})),
             "refuel" => Some(match self.amount {
                 Some(u) => serde_json::json!({"type": "refuel", "units": u}),
                 None => serde_json::json!({"type": "refuel"}),
@@ -321,6 +568,8 @@ mod order_tests {
             station: None,
             when: "next-docking".into(),
             amount: None,
+            ship: None,
+            ship_name: None,
             by: "Luke".into(),
             at: 1,
             done_at: None,
@@ -369,6 +618,8 @@ mod order_tests {
             station: Some("paws-truckstop".into()),
             when: "now".into(),
             amount: None,
+            ship: None,
+            ship_name: None,
             by: "Luke".into(),
             at: 1,
             done_at: None,

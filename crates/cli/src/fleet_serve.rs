@@ -362,7 +362,12 @@ fn proposals_with_state(ship_dir: &Path, tick: i64) -> Vec<Value> {
 /// (`repair` | `refuel` | `payLease` | `travel` | `hold`), the station resolved
 /// against the exchange's own register where a course names one, and a course
 /// order superseding the course before it (`store::place_order`).
-fn place_order(s: &Ship, b: &Value, now: i64) -> Result<ucf_pilot::store::Order, (u16, String)> {
+fn place_order(
+    s: &Ship,
+    b: &Value,
+    now: i64,
+    fleet: &[Ship],
+) -> Result<ucf_pilot::store::Order, (u16, String)> {
     let verb = b
         .get("verb")
         .and_then(Value::as_str)
@@ -370,13 +375,13 @@ fn place_order(s: &Ship, b: &Value, now: i64) -> Result<ucf_pilot::store::Order,
         .trim()
         .to_string();
     if ![
-        "repair", "refuel", "payLease", "paws", "travel", "hold", "resume",
+        "repair", "refuel", "payLease", "paws", "travel", "hold", "resume", "board",
     ]
     .contains(&verb.as_str())
     {
         return Err((
             400,
-            "verb is repair, refuel, payLease, paws, travel, hold or resume".into(),
+            "verb is repair, refuel, payLease, paws, travel, hold, resume or board".into(),
         ));
     }
     let when = b
@@ -406,6 +411,19 @@ fn place_order(s: &Ship, b: &Value, now: i64) -> Result<ucf_pilot::store::Order,
         }
         _ => None,
     };
+    // "Board KBC-04": given on the hull the captain leaves; the target is one of the
+    // same captain's other hulls, by name or world id.
+    let (ship, ship_name) = if verb == "board" {
+        let name = b.get("ship").and_then(Value::as_str).unwrap_or("").trim();
+        if name.is_empty() {
+            return Err((400, "board needs a ship".into()));
+        }
+        let (actor, hull) =
+            crate::fleet::resolve_sister(fleet, s, name).map_err(|why| (400, why))?;
+        (Some(actor), Some(hull))
+    } else {
+        (None, None)
+    };
     let orders = ucf_pilot::store::load_orders(&s.dir);
     // "Resume" / "as you were": the standing course ends and the doctrine flies again.
     // Recorded as an order already done, so the list says who ended it and when.
@@ -416,6 +434,8 @@ fn place_order(s: &Ship, b: &Value, now: i64) -> Result<ucf_pilot::store::Order,
         station,
         when,
         amount,
+        ship,
+        ship_name,
         by: b
             .get("by")
             .and_then(Value::as_str)
@@ -1103,7 +1123,7 @@ fn handle(req: Req, dir: &Path, root: &Path, tok: &str, clk: &mut Clocks) -> (u1
             let Ok(b) = serde_json::from_slice::<Value>(&req.body) else {
                 return (400, json!({"error": "json"}));
             };
-            match place_order(s, &b, now) {
+            match place_order(s, &b, now, &ships) {
                 Ok(order) => (
                     201,
                     json!({"tick": tick, "tick_seconds": tick_seconds, "order": order}),
@@ -1131,10 +1151,18 @@ fn handle(req: Req, dir: &Path, root: &Path, tok: &str, clk: &mut Clocks) -> (u1
             let Ok(b) = serde_json::from_slice::<Value>(&req.body) else {
                 return (400, json!({"error": "json"}));
             };
+            // A ship change is one hull's act, not the fleet's: it is given on the
+            // hull the captain leaves.
+            if b.get("verb").and_then(Value::as_str) == Some("board") {
+                return (
+                    400,
+                    json!({"error": "board is given on the ship the captain leaves: POST /ships/{id}/orders"}),
+                );
+            }
             let mut placed = Vec::new();
             let mut refused = Vec::new();
             for s in mine {
-                match place_order(s, &b, now) {
+                match place_order(s, &b, now, &ships) {
                     Ok(order) => placed
                         .push(json!({"world": s.world.id, "label": s.world.label, "order": order})),
                     Err((_, why)) => refused
@@ -1982,6 +2010,41 @@ mod surface_tests {
         );
         assert_eq!(code, 201, "{v}");
         assert_eq!(v["order"]["when"], "now");
+
+        // "Board Two": given on the hull the captain leaves, the target resolved to
+        // its durable actor among the SAME captain's hulls.
+        let mut rec: Captain =
+            serde_json::from_slice(&std::fs::read(two.dir.join("captain.json")).unwrap()).unwrap();
+        rec.hull_actor = "player:two".into();
+        rec.hull_name = "🐈 Two 🐈‍⬛".into();
+        std::fs::write(
+            two.dir.join("captain.json"),
+            serde_json::to_vec(&rec).unwrap(),
+        )
+        .unwrap();
+        let (code, v) = post(
+            format!("/ships/{}/orders", one.world.id),
+            r#"{"verb":"board","ship":"two"}"#,
+        );
+        assert_eq!(code, 201, "{v}");
+        assert_eq!(v["order"]["ship"], "player:two");
+        assert_eq!(
+            v["order"]["when"], "next-docking",
+            "a ship change needs a berth"
+        );
+        let (code, v) = post(
+            format!("/ships/{}/orders", one.world.id),
+            r#"{"verb":"board","ship":"Three"}"#,
+        );
+        assert_eq!(code, 400, "Mara's hull is not Luke's to board: {v}");
+        let (code, v) = post(
+            "/captains/cpt-f/orders".into(),
+            r#"{"verb":"board","ship":"two"}"#,
+        );
+        assert_eq!(
+            code, 400,
+            "a ship change is one hull's act, not the fleet's: {v}"
+        );
     }
 
     /// A named computer reads as named, and a hull with none reads as absent — the
