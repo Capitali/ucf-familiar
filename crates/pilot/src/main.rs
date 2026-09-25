@@ -119,6 +119,44 @@ impl Wire {
         serde_json::from_slice(&resp.body).map_err(|e| format!("GET {path}: {e}"))
     }
 
+    /// A GET for a cache: `Err(true)` when the exchange ANSWERED and said no, which is
+    /// worth remembering; `Err(false)` when it never answered at all, which is not.
+    fn get_for_cache(&self, path: &str) -> Result<Value, bool> {
+        let url = self.url(path).map_err(|_| true)?;
+        let resp = http::get(&url, &self.auth()).map_err(|_| false)?;
+        if !(200..300).contains(&resp.status) {
+            return Err(exchange_said_no(resp.status));
+        }
+        serde_json::from_slice(&resp.body).map_err(|_| true)
+    }
+}
+
+/// Whether a refused GET is the exchange's word or only a failure to reach it. A 4xx
+/// is its word — except 429, the rate limit, which is "ask me later". A 5xx and every
+/// transport error are an outage. Caching an outage as "unpriceable" parked Kibble
+/// Klipper at tuna-prime (2026-09-24) on 504 of 600, "no pump in reach", with the
+/// truck stop one tick and 3 fuel away: the DNS outage that morning had marked every
+/// pump unreachable for half an hour at a time.
+fn exchange_said_no(status: u16) -> bool {
+    (400..500).contains(&status) && status != 429
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::exchange_said_no;
+
+    #[test]
+    fn an_outage_is_not_an_answer() {
+        assert!(exchange_said_no(404), "no such route: remember it");
+        assert!(exchange_said_no(400));
+        assert!(!exchange_said_no(429), "rate limited: ask again");
+        assert!(!exchange_said_no(500));
+        assert!(!exchange_said_no(502));
+        assert!(!exchange_said_no(503));
+    }
+}
+
+impl Wire {
     fn act(&self, mut body: Value, action_id: &str) -> Result<Value, String> {
         // The actionId is the idempotency handle, and the contract is RETRY THE ID,
         // NEVER THE INTENT (the owner's words, ucf-exchange#14): a re-sent intent
@@ -155,8 +193,13 @@ impl Wire {
                 return r.clone();
             }
         }
-        let r = (|| {
-            let v = self.get(&format!("/v1/route?from={from}&to={to}")).ok()?;
+        let v = match self.get_for_cache(&format!("/v1/route?from={from}&to={to}")) {
+            Ok(v) => Some(v),
+            Err(true) => None,
+            // Not reached: say so this time, and ask again next time.
+            Err(false) => return None,
+        };
+        let r = v.and_then(|v| {
             let legs = v.get("legs")?.as_array()?;
             let fuel = legs.iter().filter_map(|l| l.get("fuel")?.as_i64()).sum();
             let leg_km = legs
@@ -164,7 +207,7 @@ impl Wire {
                 .map(|l| l.get("distanceKm").and_then(Value::as_i64).unwrap_or(0))
                 .collect();
             Some(PricedRoute { fuel, leg_km })
-        })();
+        });
         self.routes.borrow_mut().insert(key, (now, r.clone()));
         r
     }
@@ -186,18 +229,20 @@ impl Router for Wire {
                 return *r;
             }
         }
-        let r = (|| {
-            let v = self
-                .get(&format!(
-                    "/v1/route?from={from}&to={to}&hull=me&serviceClass={class}"
-                ))
-                .ok()?;
+        let v = match self.get_for_cache(&format!(
+            "/v1/route?from={from}&to={to}&hull=me&serviceClass={class}"
+        )) {
+            Ok(v) => Some(v),
+            Err(true) => None,
+            Err(false) => return None,
+        };
+        let r = v.and_then(|v| {
             let h = v.get("forHull")?;
             Some((
                 h.get("totalFuel")?.as_i64()?,
                 h.get("totalTicks")?.as_i64()?,
             ))
-        })();
+        });
         self.rung_quotes.borrow_mut().insert(key, (now, r));
         r
     }
@@ -584,7 +629,9 @@ fn main() -> ExitCode {
     let mut hull_changed_said = false;
 
     // The chart: which stations sell fuel. Read once; a content change is a new world.
-    let pumps: BTreeSet<String> = match wire.get("/v1/stations") {
+    // An empty chart is re-read each fold (below): a pilot that starts during an
+    // outage must not believe for its whole life that nothing sells fuel.
+    let mut pumps: BTreeSet<String> = match wire.get("/v1/stations") {
         Ok(v) => ucf_pilot::wire::pumps_from(&v),
         Err(_) => BTreeSet::new(),
     };
@@ -833,6 +880,11 @@ fn main() -> ExitCode {
 
     loop {
         let now = now_secs();
+        if pumps.is_empty() {
+            if let Ok(v) = wire.get("/v1/stations") {
+                pumps = ucf_pilot::wire::pumps_from(&v);
+            }
+        }
         // The captain may turn the dial at any time.
         dial_gate.dial = ucf_pilot::store::load_dial(&ship_dir);
 
@@ -923,6 +975,7 @@ fn main() -> ExitCode {
             }
         }
         let mut ship = ucf_pilot::wire::ship_from(&me, repair_rate);
+        ucf_pilot::wire::settle_course(&mut ship, &me, &wire);
         ship.fuel_price = fuel_price;
         // The captain's standing course, re-read every fold: while it stands
         // the dial gate refuses the doctrine's own acts. A hold AT a station where
@@ -2420,7 +2473,7 @@ fn main() -> ExitCode {
                                 )
                             });
                             let flyable = cost
-                                .map(|c| trade::carry_affordable(c, ship.fuel))
+                                .map(|c| trade::carry_flyable(c, ship.fuel, ship.fuel_capacity))
                                 .unwrap_or(false);
                             if !flyable {
                                 let why = format!(

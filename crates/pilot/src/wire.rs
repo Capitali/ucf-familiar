@@ -145,6 +145,35 @@ pub fn stray_payables(me: &Value, active_load: Option<&str>) -> Vec<(String, i64
         .unwrap_or_default()
 }
 
+/// A berthed hull whose tank cannot pay for the NEXT hop of the course it still has
+/// on file is not under way, whatever the gauge reads. `ship_from` can only judge
+/// that by a fraction (below `CRITICAL_FUEL`), and the runner's wedge watch only
+/// acts above a tenth of a tank, so a hull between the two sat "under way, no load"
+/// at a pump forever: LOCAL's twin at foxys-diner on 2026-09-24, 38 of 600 (6%),
+/// a course to tuna-prime that costs 66, four hours without a fold. The engine
+/// declines such a departure in silence (metal#79). Priced at the cheapest rung the
+/// world quotes, so a course still flyable at economy is left to fly.
+pub fn settle_course(ship: &mut Ship, me: &Value, router: &dyn Router) {
+    let Some(here) = ship.docked.as_deref().filter(|_| ship.in_flight) else {
+        return;
+    };
+    let Some(next) = me
+        .get("route")
+        .and_then(Value::as_array)
+        .and_then(|r| r.iter().filter_map(Value::as_str).find(|s| *s != here))
+    else {
+        return;
+    };
+    let cost = [doctrine::BURN_ECONOMY, doctrine::BURN_STANDARD]
+        .into_iter()
+        .filter_map(|bps| router.quote_at_burn(here, next, bps).map(|(fuel, _)| fuel))
+        .min()
+        .or_else(|| router.fuel_between(here, next));
+    if cost.is_some_and(|c| c > ship.fuel) {
+        ship.in_flight = false;
+    }
+}
+
 /// The stations that sell fuel, from `/v1/stations`. Anything unreadable is no pump.
 pub fn pumps_from(stations: &Value) -> BTreeSet<String> {
     match stations {
@@ -435,6 +464,7 @@ pub fn advise(input: &Value) -> Value {
         .unwrap_or_default();
     let pumps = pumps_from(input.get("stations").unwrap_or(&Value::Null));
     let router = TableRouter::from_json(input.get("routes").unwrap_or(&Value::Null));
+    settle_course(&mut ship, &me, &router);
     // The captain's live contract rides as ITS OWN object — `active: {row, word}`
     // — because the open board does not contain it. A hull in transit was being
     // reduced to `active_load_id`, looked up on a board of open rows, not found,
@@ -540,6 +570,42 @@ mod tests {
         );
         assert_eq!(out["automation"], "freight");
         assert_eq!(out["ship"]["docked"], "a");
+    }
+
+    /// LOCAL's twin, 2026-09-24: berthed at a pump on 38 of 600 with a course whose
+    /// next hop costs 66. Not under way — so the doctrine may speak, and at a pump
+    /// with 6% in the tank it tops up.
+    #[test]
+    fn a_course_the_tank_cannot_pay_for_is_not_flight() {
+        let mut f = fixture(38);
+        f["me"]["route"] = json!(["b", "c"]);
+        f["routes"] = json!([{"from": "a", "to": "b", "fuel": 66, "legs_km": [720000]},
+                             {"from": "b", "to": "a", "fuel": 66, "legs_km": [720000]}]);
+        let router = TableRouter::from_json(&f["routes"]);
+        let mut ship = ship_from(&f["me"], 40);
+        assert!(
+            ship.in_flight,
+            "6% is above CRITICAL_FUEL: the fraction alone says flying"
+        );
+        settle_course(&mut ship, &f["me"], &router);
+        assert!(!ship.in_flight, "38 cannot pay 66 for the next hop");
+        let out = advise(&f);
+        assert_eq!(out["decision"]["type"], "refuel", "{out}");
+    }
+
+    /// The same berth with a tank that CAN pay: the course flies itself.
+    #[test]
+    fn a_course_the_tank_can_pay_for_is_left_to_fly() {
+        let mut f = fixture(200);
+        f["me"]["route"] = json!(["b"]);
+        let router = TableRouter::from_json(&f["routes"]);
+        let mut ship = ship_from(&f["me"], 40);
+        settle_course(&mut ship, &f["me"], &router);
+        assert!(ship.in_flight);
+        // ...and an unpriced hop is never judged: not knowing is not stalled.
+        let mut ship = ship_from(&f["me"], 40);
+        settle_course(&mut ship, &f["me"], &TableRouter::from_json(&Value::Null));
+        assert!(ship.in_flight);
     }
 
     #[test]

@@ -224,6 +224,16 @@ pub fn carry_affordable(cost: i64, fuel: i64) -> bool {
     fuel >= bps(cost, CARRY_RESERVE_BPS)
 }
 
+/// A carry the runner may actually fly: affordable, AND it lands above the tanker
+/// line. Below `CRITICAL_FUEL` the doctrine calls PAWS, under way or not, so a
+/// carry that ends there is a tanker bill with a trade attached. LOCAL's twin left
+/// foxys-diner (a pump) on 38 of 600 for a 14-fuel hop, landed on 24 under a line of
+/// 30, and called the tanker (2026-09-24) — refuelling at the berth first was free.
+pub fn carry_flyable(cost: i64, fuel: i64, capacity: i64) -> bool {
+    let line = (capacity as f64 * crate::doctrine::CRITICAL_FUEL).ceil() as i64;
+    carry_affordable(cost, fuel) && fuel - cost >= line
+}
+
 /// Take the exchange's own word for when each lot may be sold.
 ///
 /// `/v1/me.holds` publishes `sellableAtTick` per good, and it is the same clock
@@ -1068,6 +1078,18 @@ pub fn decide_trade(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_carry_never_lands_under_the_tanker_line() {
+        use super::carry_flyable;
+        // LOCAL 2026-09-24: 38 in the tank, a 14-fuel hop, a line of 30.
+        assert!(!carry_flyable(14, 38, 600), "lands on 24: a tanker bill");
+        assert!(carry_flyable(14, 60, 600), "lands on 46: fly it");
+        assert!(
+            !carry_flyable(50, 55, 600),
+            "unaffordable is still unaffordable"
+        );
+    }
+
     use super::*;
 
     struct Reach(bool);
