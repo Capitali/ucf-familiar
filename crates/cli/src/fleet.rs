@@ -2469,6 +2469,15 @@ pub fn cmd_fleet(args: &[String]) -> ExitCode {
         }
         // ── names: everything the fleet has ever called anyone ─────────────────
         "papers" => crate::papers::run(&dir, &root, &f),
+        "fleet-name" => match positional.first() {
+            Some(name) if !name.trim().is_empty() => {
+                crate::papers::name_fleet(&dir, &root, name.trim(), f.get("captain"))
+            }
+            _ => {
+                eprintln!("fleet fleet-name \"<name>\" [--captain <id>]");
+                ExitCode::FAILURE
+            }
+        },
         "names" => {
             if f.contains_key("backfill") {
                 match backfill_names(&dir, &root) {
@@ -2889,7 +2898,7 @@ pub fn cmd_fleet(args: &[String]) -> ExitCode {
             ExitCode::SUCCESS
         }
         other => {
-            eprintln!("fleet: unknown subcommand `{other}` — pair | unpair | status | captains | economy | order | orders | names | papers | adopt-ids | rename | hull | choose | run | serve");
+            eprintln!("fleet: unknown subcommand `{other}` — pair | unpair | status | captains | economy | order | orders | names | papers | fleet-name | adopt-ids | rename | hull | choose | run | serve");
             ExitCode::FAILURE
         }
     }

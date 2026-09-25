@@ -392,3 +392,88 @@ fn sign_copilot(ships: &[Ship], target: &str, replace: bool) -> ExitCode {
     );
     ExitCode::SUCCESS
 }
+
+/// `fleet fleet-name "<name>" --captain <id|name>`: name the captain's fleet on the
+/// exchange (metal#86) and berth every hull the familiar flies for them in it. The
+/// exchange keeps one fleet per captain; a name another captain's fleet sails under
+/// is refused (409 `fleet-name-held`).
+pub(crate) fn name_fleet(dir: &Path, root: &Path, name: &str, who: Option<&String>) -> ExitCode {
+    let ships = paired_ships(dir, root);
+    let matches = |s: &&Ship| match who {
+        Some(w) => s.captain.captain_id == *w || s.captain.captain.contains(w.as_str()),
+        None => true,
+    };
+    let mut ids: Vec<String> = ships
+        .iter()
+        .filter(matches)
+        .map(|s| s.captain.captain_id.clone())
+        .filter(|c| !c.is_empty())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    let [cid] = ids.as_slice() else {
+        eprintln!(
+            "fleet fleet-name: {} captains match — pass --captain <id> (see `fleet papers`)",
+            ids.len()
+        );
+        return ExitCode::FAILURE;
+    };
+    let theirs: Vec<&Ship> = ships
+        .iter()
+        .filter(|s| &s.captain.captain_id == cid)
+        .collect();
+    let server = theirs[0].captain.server.clone();
+    let Some(cdir) = store::captain_dir(&theirs[0].dir, cid) else {
+        return ExitCode::FAILURE;
+    };
+    let papers = store::load_papers(&cdir);
+    let Some(key) = papers
+        .keys
+        .iter()
+        .find(|p| p.is_captain() && p.server == server)
+        .map(|p| p.secret.clone())
+    else {
+        eprintln!("fleet fleet-name: no captain key on {cid}'s record — run `fleet papers` first");
+        return ExitCode::FAILURE;
+    };
+    match wire_post(&server, &key, "/v1/captain", &json!({"fleetName": name})) {
+        Ok((c, _)) if (200..300).contains(&c) => println!("fleet: the fleet sails as \"{name}\""),
+        Ok((c, v)) => {
+            eprintln!("fleet fleet-name: refused — HTTP {c} {v}");
+            return ExitCode::FAILURE;
+        }
+        Err(e) => {
+            eprintln!("fleet fleet-name: the exchange did not answer: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
+    let mut failed = false;
+    for s in &theirs {
+        let hull = &s.captain.hull_actor;
+        if hull.is_empty() {
+            println!(
+                "  {} — no hull actor on file, not berthed",
+                s.captain.hull_name
+            );
+            continue;
+        }
+        match wire_post(&server, &key, "/v1/captain", &json!({"berth": hull})) {
+            Ok((c, _)) if (200..300).contains(&c) => {
+                println!("  {} berthed", s.captain.hull_name)
+            }
+            Ok((c, v)) => {
+                failed = true;
+                println!("  {} not berthed — HTTP {c} {v}", s.captain.hull_name)
+            }
+            Err(e) => {
+                failed = true;
+                println!("  {} not berthed — {e}", s.captain.hull_name)
+            }
+        }
+    }
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
