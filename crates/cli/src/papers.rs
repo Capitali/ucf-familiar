@@ -458,9 +458,15 @@ pub(crate) fn name_fleet(dir: &Path, root: &Path, name: &str, who: Option<&Strin
             continue;
         }
         match wire_post(&server, &key, "/v1/captain", &json!({"berth": hull})) {
-            Ok((c, _)) if (200..300).contains(&c) => {
-                println!("  {} berthed", s.captain.hull_name)
-            }
+            // Another captain's hull without their leave is ASKED for, not berthed
+            // (ucf-exchange#75): the 200 lists it under berthRequestsOut instead.
+            Ok((c, v)) if (200..300).contains(&c) => match berth_word(&v, hull) {
+                Berth::Asked => println!(
+                    "  {} not berthed yet — asked its holder; it berths once they allow it",
+                    s.captain.hull_name
+                ),
+                Berth::Berthed => println!("  {} berthed", s.captain.hull_name),
+            },
             Ok((c, v)) => {
                 failed = true;
                 println!("  {} not berthed — HTTP {c} {v}", s.captain.hull_name)
@@ -475,5 +481,43 @@ pub(crate) fn name_fleet(dir: &Path, root: &Path, name: &str, who: Option<&Strin
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+enum Berth {
+    Berthed,
+    Asked,
+}
+
+/// What a 200 to `berth` meant: the hull is in `berths`, or the holder was asked
+/// (`berthRequestsOut`). An exchange from before #75 lists neither: berthed, as it was.
+fn berth_word(reply: &Value, hull: &str) -> Berth {
+    let listed = |field: &str, pick: &dyn Fn(&Value) -> Option<&str>| {
+        reply
+            .get(field)
+            .and_then(Value::as_array)
+            .is_some_and(|a| a.iter().any(|v| pick(v) == Some(hull)))
+    };
+    if !listed("berths", &|v| v.as_str())
+        && listed("berthRequestsOut", &|v| v.get("hull").and_then(Value::as_str))
+    {
+        Berth::Asked
+    } else {
+        Berth::Berthed
+    }
+}
+
+#[cfg(test)]
+mod berth_tests {
+    use super::{berth_word, Berth};
+    use serde_json::json;
+
+    #[test]
+    fn a_hull_asked_for_is_not_called_berthed() {
+        let asked = json!({"berths": [], "berthRequestsOut": [{"hull": "player:c", "captainId": "captain:x", "captain": "X"}]});
+        assert!(matches!(berth_word(&asked, "player:c"), Berth::Asked));
+        let ours = json!({"berths": ["player:c"]});
+        assert!(matches!(berth_word(&ours, "player:c"), Berth::Berthed));
+        assert!(matches!(berth_word(&json!({}), "player:c"), Berth::Berthed));
     }
 }

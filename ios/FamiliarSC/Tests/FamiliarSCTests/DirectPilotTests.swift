@@ -276,7 +276,8 @@ final class DirectPilotTests: XCTestCase {
         let post = MockExchange.posts[0]
         XCTAssertEqual(post.path, "/v1/actions")
         XCTAssertEqual(post.body, .object(["actionId": .string(p.actionId), "type": .string("travel"),
-                                           "station": .string("paws-neptune"), "serviceClass": .string("economy")]),
+                                           "station": .string("paws-neptune"), "serviceClass": .string("economy"),
+                                           "engage": .bool(true)]),
                        "the host runner's own body for a divert, plus the retained id")
         XCTAssertTrue(said.hasPrefix("Filed: file a course to paws-neptune on the economy burn (act-000001) — the fold answers at t7533"), said)
         XCTAssertGreaterThanOrEqual(mind.inputs.count, 2, "the mind was asked again, fresh, before filing")
@@ -444,7 +445,7 @@ final class DirectPilotTests: XCTestCase {
         // Bodies are the host runner's (crates/pilot/src/main.rs).
         XCTAssertEqual(ExchangeAct.callPaws.body, ["type": .string("paws")])
         XCTAssertEqual(ExchangeAct.collect(loadId: "L2").body, ["type": .string("collect"), "loadId": .string("L2")])
-        XCTAssertEqual(ExchangeAct.travel(station: "x", serviceClass: nil).body, ["type": .string("travel"), "station": .string("x")])
+        XCTAssertEqual(ExchangeAct.travel(station: "x", serviceClass: nil).body, ["type": .string("travel"), "station": .string("x"), "engage": .bool(true)])
     }
 
     // MARK: finding 4 — reasons in words, facts the doctrine's

@@ -281,7 +281,10 @@ public enum ExchangeAct: Equatable, Sendable {
         case .repair: return ["type": .string("repair")]
         case .callPaws: return ["type": .string("paws")]
         case .travel(let station, let serviceClass):
-            var b: [String: JSONValue] = ["type": .string("travel"), "station": .string(station)]
+            // The course carries its ENGAGE (ucf-exchange#79), as the host runner files it:
+            // both fold at one boundary. A world with no drive gate ignores the flag.
+            var b: [String: JSONValue] = ["type": .string("travel"), "station": .string(station),
+                                          "engage": .bool(true)]
             if let serviceClass { b["serviceClass"] = .string(serviceClass) }
             return b
         case .book(let loadId): return ["type": .string("book"), "loadId": .string(loadId)]

@@ -276,6 +276,43 @@ fn select_papers(wire: &Wire, candidates: &mut [Candidate], want: Option<&str>) 
     }
 }
 
+/// A course carries its ENGAGE (ucf-exchange#79): the course and the drive fold at
+/// one boundary instead of two, three minutes a departure on PROD. A world with no
+/// drive gate ignores the flag and departs on the filing as it always did. A body
+/// that already says (`engage: false` included) is left as it is.
+fn engage_with_course(body: &mut Value) {
+    if body.get("type").and_then(Value::as_str) == Some("travel") && body.get("engage").is_none()
+    {
+        body["engage"] = json!(true);
+    }
+}
+
+#[cfg(test)]
+mod engage_tests {
+    use super::engage_with_course;
+    use serde_json::json;
+
+    #[test]
+    fn a_course_carries_its_engage() {
+        let mut b = json!({"type": "travel", "station": "foxys-diner"});
+        engage_with_course(&mut b);
+        assert_eq!(b["engage"], true);
+    }
+
+    #[test]
+    fn nothing_else_grows_the_flag_and_a_stated_one_stands() {
+        let mut e = json!({"type": "engage"});
+        engage_with_course(&mut e);
+        assert!(e.get("engage").is_none());
+        let mut r = json!({"type": "refuel"});
+        engage_with_course(&mut r);
+        assert!(r.get("engage").is_none());
+        let mut held = json!({"type": "travel", "station": "x", "engage": false});
+        engage_with_course(&mut held);
+        assert_eq!(held["engage"], false);
+    }
+}
+
 #[cfg(test)]
 mod cache_tests {
     use super::exchange_said_no;
@@ -298,6 +335,7 @@ impl Wire {
         // must carry the SAME id, or a transient failure after server acceptance
         // becomes a double-book. The caller owns the id for exactly that reason.
         body["actionId"] = json!(action_id);
+        engage_with_course(&mut body);
         let url = self.url("/v1/actions")?;
         let bytes = serde_json::to_vec(&body).map_err(|e| e.to_string())?;
         let resp = http::post_json(&url, &self.auth(), &bytes).map_err(|e| format!("{e:?}"))?;
