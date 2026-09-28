@@ -1680,6 +1680,11 @@ fn main() -> ExitCode {
         // before she berths.
         let berthed_or_bound =
             (!ship.in_flight && ship.docked.is_some()) || (ship.in_flight && ship.bound_for.is_some());
+        let sister_claimed = if berthed_or_bound && slot_free {
+            store::sister_claims(&ship_dir, &server, now)
+        } else {
+            Default::default()
+        };
         let board: Vec<LoadRow> = if berthed_or_bound && slot_free {
             match wire.get("/v1/loadboard?status=open") {
                 Ok(Value::Array(rows)) => rows
@@ -1691,6 +1696,8 @@ fn main() -> ExitCode {
                             .map(|t| tick - t > LOST_COOLDOWN_TICKS)
                             .unwrap_or(true)
                     })
+                    // A sister of this captain's just filed for it: not ours to race.
+                    .filter(|l| !sister_claimed.contains(&l.load_id))
                     .collect(),
                 Ok(_) | Err(_) => Vec::new(),
             }
@@ -3158,6 +3165,7 @@ fn main() -> ExitCode {
                             "resolves": pending_until - 1, "fuel": ship.fuel, "credits": ship.credits}),
                         );
                         if let Decision::Book { load_id } = &decision {
+                            store::claim_load(&ship_dir, &server, load_id, now);
                             if let Some(row) = board.iter().find(|l| &l.load_id == load_id) {
                                 let booked = Active {
                                     row: row.clone(),

@@ -719,3 +719,75 @@ mod order_tests {
         assert_eq!(paws.action(), Some(serde_json::json!({"type": "paws"})));
     }
 }
+
+
+// ---------------------------------------------------------------------------
+// Fleet claims: one captain's hulls do not race each other for one load.
+// ---------------------------------------------------------------------------
+//
+// KK and KBC-04 both booked L7224 on PROD at t19259 (2026-09-28), nine seconds apart;
+// the exchange gave it to the first and refused the second, which lost a fold and
+// journaled a lost load. A pilot now writes a claim beside the ship stores when it
+// FILES a booking, and a sister on the same exchange passes over any load claimed
+// in the last [`CLAIM_TTL_SECS`]. A claim is advisory: the exchange stays the judge.
+
+pub const CLAIMS_FILE: &str = "fleet-claims.jsonl";
+/// How long a claim stands: long enough for the booking to fold and show on the
+/// board as taken, short enough that a refused booking frees the load again.
+pub const CLAIM_TTL_SECS: i64 = 900;
+
+/// Record that the hull in `ship_dir` has filed a booking for `load` on `server`.
+pub fn claim_load(ship_dir: &Path, server: &str, load: &str, now: i64) {
+    let (Some(root), Some(world)) = (ship_dir.parent(), ship_dir.file_name()) else {
+        return;
+    };
+    let line = serde_json::json!({"load": load, "server": server,
+        "world": world.to_string_lossy(), "at": now});
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(root.join(CLAIMS_FILE))
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// Loads a SISTER (another store beside this one, same exchange) has claimed recently.
+pub fn sister_claims(ship_dir: &Path, server: &str, now: i64) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let (Some(root), Some(world)) = (ship_dir.parent(), ship_dir.file_name()) else {
+        return out;
+    };
+    let me = world.to_string_lossy();
+    let Ok(text) = std::fs::read_to_string(root.join(CLAIMS_FILE)) else {
+        return out;
+    };
+    for v in text.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()) {
+        let s = |k: &str| v.get(k).and_then(serde_json::Value::as_str).unwrap_or("");
+        let at = v.get("at").and_then(serde_json::Value::as_i64).unwrap_or(0);
+        if s("server") == server && s("world") != me && now - at <= CLAIM_TTL_SECS {
+            out.insert(s("load").to_string());
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod claim_tests {
+    use super::{claim_load, sister_claims, CLAIM_TTL_SECS};
+
+    #[test]
+    fn a_sister_passes_over_a_load_another_hull_just_booked() {
+        let root = std::env::temp_dir().join(format!("claims-{}", std::process::id()));
+        let (kk, kbc) = (root.join("world-kk"), root.join("world-kbc"));
+        std::fs::create_dir_all(&kk).unwrap();
+        std::fs::create_dir_all(&kbc).unwrap();
+        claim_load(&kk, "https://prod", "L7224", 1_000);
+        assert!(sister_claims(&kbc, "https://prod", 1_010).contains("L7224"));
+        assert!(!sister_claims(&kk, "https://prod", 1_010).contains("L7224"), "not her own");
+        assert!(!sister_claims(&kbc, "http://local", 1_010).contains("L7224"), "another exchange");
+        assert!(!sister_claims(&kbc, "https://prod", 1_001 + CLAIM_TTL_SECS).contains("L7224"), "lapsed");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
