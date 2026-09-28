@@ -1,0 +1,19 @@
+# The fleet supervisor on the lighthouse: one whisker per paired ship, leases renewed
+# inside 2 h of expiry. Stores live under /var/lib/ucf-fleet (data/, worlds/, captains/).
+[Unit]
+Description=UCF fleet supervisor (ucf-familiar fleet run)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/ucf-familiar
+ExecStart=/opt/ucf-familiar/target/release/ucf-familiar fleet run --renew --whisker /opt/ucf-familiar/target/release/whisker --data-dir /var/lib/ucf-fleet/data
+Restart=always
+RestartSec=10
+# Pilots are its children; stopping the supervisor stops them with it.
+KillMode=control-group
+StandardOutput=append:/var/lib/ucf-fleet/fleet-run.log
+StandardError=append:/var/lib/ucf-fleet/fleet-run.log
+
+[Install]
+WantedBy=multi-user.target

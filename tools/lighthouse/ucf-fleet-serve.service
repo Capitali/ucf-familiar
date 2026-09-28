@@ -1,0 +1,17 @@
+# The companion app's feed, loopback only: Caddy terminates real TLS for
+# https://lighthouse.river.io/fleet/* and proxies here (iOS will not trust a
+# self-signed certificate off the LAN). Bearer = /var/lib/ucf-fleet/data/fleet-serve.token.
+[Unit]
+Description=UCF fleet feed (ucf-familiar fleet serve)
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/ucf-familiar
+ExecStart=/opt/ucf-familiar/target/release/ucf-familiar fleet serve --bind 127.0.0.1:7899 --data-dir /var/lib/ucf-fleet/data
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/lib/ucf-fleet/fleet-serve.log
+StandardError=append:/var/lib/ucf-fleet/fleet-serve.log
+
+[Install]
+WantedBy=multi-user.target
