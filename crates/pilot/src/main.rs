@@ -276,6 +276,17 @@ fn select_papers(wire: &Wire, candidates: &mut [Candidate], want: Option<&str>) 
     }
 }
 
+/// Ticks a refused `duty` waits before it is tried again.
+const DUTY_COOLOFF_TICKS: i64 = 30;
+
+/// The noticeboard has work (`/v1/me.dutyReadyTick` at or before now). A world that
+/// does not publish the field posts no duties, so the answer there is no.
+fn duty_ready(me: &Value, tick: i64) -> bool {
+    me.get("dutyReadyTick")
+        .and_then(Value::as_i64)
+        .is_some_and(|ready| ready <= tick)
+}
+
 /// A course carries its ENGAGE (ucf-exchange#79): the course and the drive fold at
 /// one boundary instead of two, three minutes a departure on PROD. A world with no
 /// drive gate ignores the flag and departs on the filing as it always did. A body
@@ -291,6 +302,14 @@ fn engage_with_course(body: &mut Value) {
 mod engage_tests {
     use super::engage_with_course;
     use serde_json::json;
+
+    #[test]
+    fn a_shift_is_worked_only_when_the_board_has_one() {
+        use super::duty_ready;
+        assert!(duty_ready(&json!({"dutyReadyTick": 100}), 100));
+        assert!(!duty_ready(&json!({"dutyReadyTick": 101}), 100));
+        assert!(!duty_ready(&json!({}), 100), "a world that posts no duties");
+    }
 
     #[test]
     fn a_course_carries_its_engage() {
@@ -1055,6 +1074,11 @@ fn main() -> ExitCode {
             })
             .unwrap_or_default();
     let mut last_outfit_idle = String::new();
+    // A refused shift (a bare treasury, a board the fold disagrees about) is not retried
+    // every fold: the noticeboard's own clock is the usual answer, this is the backstop.
+    let mut duty_cooloff_until: i64 = 0;
+    // Road events already answered or journaled (kind|course end|landing tick).
+    let mut roads_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut last_pending_note = String::new();
     let mut last_distress = String::new();
     let mut dial_gate = DialGate {
@@ -1651,7 +1675,12 @@ fn main() -> ExitCode {
         // 2026-09-17 after two days of zero companions on LOCAL (176 bookings) with
         // eight of eight origins offering a same-destination second load.
         let slot_free = active.is_none() || (1 + companions.len() as i64) < bay_cap;
-        let board: Vec<LoadRow> = if !ship.in_flight && ship.docked.is_some() && slot_free {
+        // ...and in the AIR when the course's end is known (ucf-exchange#74: the board
+        // prices a ship in flight from where it lands), so the next job is booked
+        // before she berths.
+        let berthed_or_bound =
+            (!ship.in_flight && ship.docked.is_some()) || (ship.in_flight && ship.bound_for.is_some());
+        let board: Vec<LoadRow> = if berthed_or_bound && slot_free {
             match wire.get("/v1/loadboard?status=open") {
                 Ok(Value::Array(rows)) => rows
                     .iter()
@@ -2828,6 +2857,69 @@ fn main() -> ExitCode {
             }
         }
 
+        // THE ROAD (metal#107). A leg's event is answered once, while under way; unanswered,
+        // its default is applied at the berth. The doctrine speaks only when the other
+        // answer is cheaper, so silence here IS the default, said once in the journal.
+        if tick >= pending_until {
+            if let Some(road) = ship.road.clone() {
+                let key = format!("{}|{}|{}", road.kind, ship.bound_for.clone().unwrap_or_default(), ship.arrives_tick);
+                if !roads_seen.contains(&key) {
+                    roads_seen.insert(key);
+                    let choice = doctrine::answer_road(&ship, active.as_ref());
+                    let denied = ship.denied.iter().any(|v| v == "road");
+                    match choice {
+                        Some(c) if !denied => {
+                            let body = json!({"type": "road", "choice": c});
+                            if dial_gate.allow(
+                                &ship_dir,
+                                Surface::NavigationCourse,
+                                tick,
+                                now,
+                                &body,
+                                &format!("answer the {} with {c}", road.kind),
+                                "the cheaper of the sealed costs",
+                            ) {
+                                seq += 1;
+                                let id = format!("whisker-{}-{}", now_secs(), seq);
+                                match wire.act(body, &id) {
+                                    Ok(ack) => {
+                                        pending_until = ack
+                                            .get("resolvesAtTick")
+                                            .and_then(Value::as_i64)
+                                            .unwrap_or(tick)
+                                            + 1;
+                                        journal(
+                                            &ship_dir,
+                                            json!({"at": now, "tick": tick, "event": "road-answered",
+                                            "kind": road.kind, "choice": c, "wear_bps": road.wear_bps,
+                                            "fuel": road.fuel, "hold_ticks": road.hold_ticks,
+                                            "resolves": pending_until - 1}),
+                                        );
+                                    }
+                                    Err(e) => journal(
+                                        &ship_dir,
+                                        json!({"at": now, "tick": tick, "event": "road-refused",
+                                        "kind": road.kind, "choice": c, "why": e}),
+                                    ),
+                                }
+                            }
+                        }
+                        _ => journal(
+                            &ship_dir,
+                            json!({"at": now, "tick": tick, "event": "road-default",
+                            "kind": road.kind, "wear_bps": road.wear_bps, "fuel": road.fuel,
+                            "hold_ticks": road.hold_ticks,
+                            "why": if denied && choice.is_some() {
+                                "this key cannot answer the road; the default stands"
+                            } else {
+                                "the default is the cheaper answer"
+                            }}),
+                        ),
+                    }
+                }
+            }
+        }
+
         // MONEY ON THE DESK FIRST. The doctrine tracks one active
         // contract; the engine lets a hull hold three. A delivered contract that is
         // not the active one had its pay sit uncollected — KK II's L4200, ℳ684, for two
@@ -3115,6 +3207,52 @@ fn main() -> ExitCode {
                 }
             }
         } else if let Decision::Hold { why } = &decision {
+            // A DOCKED SHIFT while she waits (`duty`): the noticeboard pays from the
+            // station's treasury, notes a little standing in the file (which the frame
+            // rungs are certified to), and holds the hull for nothing — so a fold the
+            // doctrine would spend holding at a berth is worth a shift when one is posted.
+            if ship.docked.is_some()
+                && tick >= pending_until
+                && tick >= duty_cooloff_until
+                && duty_ready(&me, tick)
+                && !ship.denied.iter().any(|v| v == "duty")
+            {
+                let body = json!({"type": "duty"});
+                if dial_gate.allow(
+                    &ship_dir,
+                    Surface::FreightCollect,
+                    tick,
+                    now,
+                    &body,
+                    "work a docked shift off the noticeboard",
+                    "the hull is holding at a berth and the board has work",
+                ) {
+                    seq += 1;
+                    let id = format!("whisker-{}-{}", now_secs(), seq);
+                    match wire.act(body, &id) {
+                        Ok(ack) => {
+                            pending_until = ack
+                                .get("resolvesAtTick")
+                                .and_then(Value::as_i64)
+                                .unwrap_or(tick)
+                                + 1;
+                            journal(
+                                &ship_dir,
+                                json!({"at": now, "tick": tick, "event": "acted", "decision": "Duty",
+                                "credits": ship.credits, "fuel": ship.fuel, "resolves": pending_until - 1}),
+                            );
+                        }
+                        Err(e) => {
+                            duty_cooloff_until = tick + DUTY_COOLOFF_TICKS;
+                            journal(
+                                &ship_dir,
+                                json!({"at": now, "tick": tick, "event": "refused-at-the-door",
+                                "decision": "Duty", "why": e}),
+                            );
+                        }
+                    }
+                }
+            }
             // Holds are journaled only when the reason changes — a quiet watch, not a
             // silent one.
             if why != &last_refusal {

@@ -49,6 +49,13 @@ pub struct Ship {
     pub repair_per_hundred_bps: i64,
     /// True when a course is filed / legs remain — the engine is flying us.
     pub in_flight: bool,
+    /// Under way: where the course ends (`/v1/me.enRouteTo`, the last hop of a
+    /// multi-hop route) and the tick she lands (`arriveTick`). None/0 berthed, or
+    /// on a world that does not say.
+    pub bound_for: Option<String>,
+    pub arrives_tick: i64,
+    /// This leg's event on THE ROAD (metal#107), once revealed and still unanswered.
+    pub road: Option<RoadEvent>,
     pub hold_used: i64,
     pub hold_capacity: i64,
     pub fuel: i64,
@@ -62,6 +69,17 @@ pub struct Ship {
     /// call). A decision the key cannot file is not a decision; the doctrine
     /// passes it by and says so. Empty = everything permitted.
     pub denied: Vec<String>,
+}
+
+/// A leg's event on THE ROAD as `/v1/me.road` publishes it: every cost the answers
+/// can pay was sealed at departure; the answer only picks which one is paid.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RoadEvent {
+    /// `storm`, `debris` or `cargo`.
+    pub kind: String,
+    pub wear_bps: i64,
+    pub fuel: i64,
+    pub hold_ticks: i64,
 }
 
 /// One row of the open load board (a subset of `/v1/loadboard`).
@@ -630,6 +648,11 @@ pub fn decide_with(
             };
         }
         if ship.in_flight {
+            if let Some(book) =
+                book_in_the_air(ship, Some(active), companions, board, pumps, router)
+            {
+                return book;
+            }
             return Decision::Hold {
                 why: "under way".into(),
             };
@@ -716,6 +739,9 @@ pub fn decide_with(
     }
 
     if ship.in_flight {
+        if let Some(book) = book_in_the_air(ship, None, companions, board, pumps, router) {
+            return book;
+        }
         return Decision::Hold {
             why: "under way, no load".into(),
         };
@@ -793,71 +819,7 @@ pub fn decide_with(
         });
     }
     for l in ranked.into_iter().take(PRICED_CANDIDATES) {
-        let (Some(dead), Some(haul)) = (
-            router.fuel_between(here, &l.origin),
-            router.fuel_between(&l.origin, &l.dest),
-        ) else {
-            continue;
-        };
-        // Can we be at the origin, loaded, inside the desk's pickup window? The
-        // honest deadhead is the engine's own arithmetic on tonight's separations at
-        // the drive THIS contract's class leaves us — L2706 on PROD (economy, 88%
-        // wear) took 74 ticks over a 39-tick lane and the desk took it back at +48.
-        // The board's figure is the fallback when the router cannot price legs.
-        let hull = if ship.accel_milli_g > 0 {
-            ship.accel_milli_g
-        } else {
-            REFERENCE_ACCEL_MILLI_G
-        };
-        let class = if l.class_bps > 0 { l.class_bps } else { 10_000 };
-        let accel = contract_accel(hull, class);
-        let dead_ticks = router
-            .leg_distances_km(here, &l.origin)
-            .map(|d| flight_ticks(&d, accel))
-            .unwrap_or(l.deadhead_ticks);
-        if dead_ticks + ENGAGE_OVERHEAD_TICKS + l.loading_ticks.max(8) > PICKUP_TTL_TICKS {
-            continue;
-        }
-        // ...and the whole plan must LAND before the delivery deadline, which is
-        // the second clock every contract carries and the one this guard never
-        // read. Past it the fold force-settles the load wherever the hull is:
-        // only what fits the destination's shelf lands, the rest is vented
-        // unpaid, and the clean-delivery bonuses are forfeit. A load that cannot
-        // be delivered in time is not a load; it is a way to lose cargo slowly.
-        // (Raised 2026-09-08, as the "timer on my cargo" warning.)
-        if l.deliver_deadline_tick > 0 {
-            let haul_ticks = router
-                .leg_distances_km(&l.origin, &l.dest)
-                .map(|d| flight_ticks(&d, accel))
-                .unwrap_or(l.haul_ticks);
-            let lands_at = ship.tick
-                + dead_ticks
-                + ENGAGE_OVERHEAD_TICKS
-                + l.loading_ticks.max(8)
-                + haul_ticks
-                + ENGAGE_OVERHEAD_TICKS;
-            if lands_at > l.deliver_deadline_tick {
-                continue;
-            }
-        }
-        // The plan must reach a pump AFTER the delivery too: a hull that arrives at
-        // a pumpless destination with an empty tank has no move left but the
-        // tanker (LOCAL, titan-larder, 2026-09-02: fuel 94, no pump in reach, a
-        // PAWS call-out from Saturn for ~15,000 ℳ). Cost of the onward leg to the
-        // nearest priceable pump, zero when the destination pumps.
-        let onward = onward_to_pump(&l.dest, pumps, router);
-        // The quote is for the reference drive; these legs fly at the contract's.
-        let dead = fuel_at_drive(dead, accel);
-        let haul = fuel_at_drive(haul, accel);
-        let onward = fuel_at_drive(onward, accel);
-        let whole = ((dead + haul + onward) as f64 * RESERVE) as i64;
-        let dead_only = (dead as f64 * RESERVE) as i64;
-        let haul_only = ((haul + onward) as f64 * RESERVE) as i64;
-        if ship.fuel >= whole
-            || (pumps.contains(l.origin.as_str())
-                && ship.fuel >= dead_only
-                && ship.fuel_capacity >= haul_only)
-        {
+        if bookable_from(ship, here, l, pumps, router, None) {
             return Decision::Book {
                 load_id: l.load_id.clone(),
             };
@@ -905,6 +867,215 @@ pub fn decide_with(
     }
     Decision::Hold {
         why: "no fuelable work on the board".into(),
+    }
+}
+
+/// Slack kept inside the pickup window for a booking made in the air: a storm
+/// the pilot stands off adds its `holdTicks` to the landing.
+const AIR_MARGIN_TICKS: i64 = 6;
+
+/// Can this hull take `l` from `here` — inside the desk's pickup window, landed before
+/// the delivery deadline, and on the fuel it holds? `air` is `Some(ticks left to fly)`
+/// when the hull is still in flight TO `here` (booked in the air, ucf-exchange#74).
+/// The fuel it holds is what it will land with: the exchange charges a leg's
+/// propellant at departure.
+fn bookable_from(
+    ship: &Ship,
+    here: &str,
+    l: &LoadRow,
+    pumps: &BTreeSet<String>,
+    router: &dyn Router,
+    air: Option<i64>,
+) -> bool {
+    let (Some(dead), Some(haul)) = (
+        router.fuel_between(here, &l.origin),
+        router.fuel_between(&l.origin, &l.dest),
+    ) else {
+        return false;
+    };
+    // Can we be at the origin, loaded, inside the desk's pickup window? The
+    // honest deadhead is the engine's own arithmetic on tonight's separations at
+    // the drive THIS contract's class leaves us — L2706 on PROD (economy, 88%
+    // wear) took 74 ticks over a 39-tick lane and the desk took it back at +48.
+    // The board's figure is the fallback when the router cannot price legs.
+    let hull = if ship.accel_milli_g > 0 {
+        ship.accel_milli_g
+    } else {
+        REFERENCE_ACCEL_MILLI_G
+    };
+    let class = if l.class_bps > 0 { l.class_bps } else { 10_000 };
+    let accel = contract_accel(hull, class);
+    let path_ticks = router
+        .leg_distances_km(here, &l.origin)
+        .map(|d| flight_ticks(&d, accel))
+        .unwrap_or(l.deadhead_ticks);
+    // In the air `here` is where the course ENDS and `air` the ticks left to fly
+    // there. The exchange's board prices the same thing (ucf-exchange#74: the rest
+    // of this leg plus the path from its end), so the deadhead is the larger of
+    // the two, and a margin rides on top for a flight the road holds up.
+    let dead_ticks = match air {
+        Some(remaining) => (path_ticks + remaining.max(0)).max(l.deadhead_ticks),
+        None => path_ticks,
+    };
+    let slack = if air.is_some() { AIR_MARGIN_TICKS } else { 0 };
+    if dead_ticks + ENGAGE_OVERHEAD_TICKS + l.loading_ticks.max(8) + slack > PICKUP_TTL_TICKS {
+        return false;
+    }
+    // ...and the whole plan must LAND before the delivery deadline, which is
+    // the second clock every contract carries and the one this guard never
+    // read. Past it the fold force-settles the load wherever the hull is:
+    // only what fits the destination's shelf lands, the rest is vented
+    // unpaid, and the clean-delivery bonuses are forfeit. A load that cannot
+    // be delivered in time is not a load; it is a way to lose cargo slowly.
+    // (Raised 2026-09-08, as the "timer on my cargo" warning.)
+    if l.deliver_deadline_tick > 0 {
+        let haul_ticks = router
+            .leg_distances_km(&l.origin, &l.dest)
+            .map(|d| flight_ticks(&d, accel))
+            .unwrap_or(l.haul_ticks);
+        let lands_at = ship.tick
+            + dead_ticks
+            + slack
+            + ENGAGE_OVERHEAD_TICKS
+            + l.loading_ticks.max(8)
+            + haul_ticks
+            + ENGAGE_OVERHEAD_TICKS;
+        if lands_at > l.deliver_deadline_tick {
+            return false;
+        }
+    }
+    // The plan must reach a pump AFTER the delivery too: a hull that arrives at
+    // a pumpless destination with an empty tank has no move left but the
+    // tanker (LOCAL, titan-larder, 2026-09-02: fuel 94, no pump in reach, a
+    // PAWS call-out from Saturn for ~15,000 ℳ). Cost of the onward leg to the
+    // nearest priceable pump, zero when the destination pumps.
+    let onward = onward_to_pump(&l.dest, pumps, router);
+    // The quote is for the reference drive; these legs fly at the contract's.
+    let dead = fuel_at_drive(dead, accel);
+    let haul = fuel_at_drive(haul, accel);
+    let onward = fuel_at_drive(onward, accel);
+    let whole = ((dead + haul + onward) as f64 * RESERVE) as i64;
+    let dead_only = (dead as f64 * RESERVE) as i64;
+    let haul_only = ((haul + onward) as f64 * RESERVE) as i64;
+    ship.fuel >= whole
+        || (pumps.contains(l.origin.as_str())
+            && ship.fuel >= dead_only
+            && ship.fuel_capacity >= haul_only)
+}
+
+/// BOOK IT IN THE AIR (ucf-exchange#74, UCF-Haul#74 "line up the next job in the
+/// air"). A hull used to hold "under way" until she berthed, then spent a boundary
+/// collecting, one booking and one more departing: three minutes each on PROD,
+/// while the best load on the board went to whoever was already docked. The board
+/// now prices a ship in flight from where her course ends, so the next job can be
+/// booked before she lands and she lands ready to load.
+///
+/// Two cases, both conservative:
+/// - **Flying light** (no contract in hand): the best-paying load the whole plan
+///   can fuel, priced from the course's end with the rest of the flight counted.
+/// - **Flying laden to her own delivery**: only a load that ORIGINATES at that
+///   delivery berth (zero deadhead once landed) and fits the hold as it stands
+///   now, so it cannot compete with the cargo still aboard. The tour planner
+///   takes it from there as a companion: deliver, load, fly on.
+/// A deadhead under contract (booked, not yet picked up) books nothing: her next
+/// berth is a pickup with a window already running.
+pub fn book_in_the_air(
+    ship: &Ship,
+    active: Option<&Active>,
+    companions: &[Active],
+    board: &[LoadRow],
+    pumps: &BTreeSet<String>,
+    router: &dyn Router,
+) -> Option<Decision> {
+    if !ship.in_flight || ship.denied.iter().any(|v| v == "book") {
+        return None;
+    }
+    let end = ship.bound_for.as_deref()?;
+    if ship.arrives_tick <= 0 {
+        return None;
+    }
+    let remaining = (ship.arrives_tick - ship.tick).max(0);
+    let held = active.is_some() as i64 + companions.len() as i64;
+    if held >= BAY_LIMIT {
+        return None;
+    }
+    if let Some(a) = active {
+        // Laden to her own delivery, and nothing else in the bay to reason about.
+        if a.word != ActiveWord::PickedUp || a.row.dest != end || !companions.is_empty() {
+            return None;
+        }
+    }
+    let spare = ship.hold_capacity - ship.hold_used;
+    let mut ranked: Vec<&LoadRow> = board
+        .iter()
+        .filter(|l| !l.held_for_other && l.units <= spare)
+        .filter(|l| active.is_none() || l.origin == end)
+        .filter(|l| l.pilot_ticks() > 0 && l.estimated_net > 0)
+        .collect();
+    let rate = |l: &LoadRow| l.estimated_net as f64 / l.pilot_ticks() as f64;
+    ranked.sort_by(|a, b| {
+        rate(b)
+            .partial_cmp(&rate(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.load_id.cmp(&b.load_id))
+    });
+    ranked
+        .into_iter()
+        .take(PRICED_CANDIDATES)
+        .find(|l| bookable_from(ship, end, l, pumps, router, Some(remaining)))
+        .map(|l| Decision::Book {
+            load_id: l.load_id.clone(),
+        })
+}
+
+/// ℳ a tick of pilot time is worth when the road asks whether to stand off a storm:
+/// a conservative floor of what the fleet earns under way.
+const ROAD_TICK_VALUE: i64 = 10;
+
+/// The answer to THE ROAD (metal#107), or None to let the stated default stand (the
+/// exchange applies it at the berth, so saying nothing IS that answer). Every cost
+/// was sealed at departure; the answer only chooses which one is paid.
+///
+/// - **Wear** is free on a leased hull (the yard clears it for nothing) and on a
+///   drive already fully worn (it cannot wear further); on a titled hull it is
+///   the yard's invoice, `wearBps × rate / 100`.
+/// - **Fuel** is the pump price, and never below what the rest of the plan needs:
+///   the tank is kept for the job, not the debris.
+/// - **Time** is [`ROAD_TICK_VALUE`] a tick, and a hold that would land a contract
+///   past its delivery deadline is never taken.
+/// - **Cargo**: tending only relieves a shipper bill's shrinkage, and this pilot
+///   carries none — `leave`, the default, is always the answer.
+pub fn answer_road(ship: &Ship, active: Option<&Active>) -> Option<&'static str> {
+    let road = ship.road.as_ref()?;
+    let rate = if ship.repair_per_hundred_bps > 0 {
+        ship.repair_per_hundred_bps
+    } else {
+        REPAIR_COST_PER_HUNDRED_BPS
+    };
+    let wear_cost = if ship.leased || ship.wear_bps >= 10_000 {
+        0
+    } else {
+        road.wear_bps.min(10_000 - ship.wear_bps) * rate / 100
+    };
+    match road.kind.as_str() {
+        "storm" => {
+            let late = active.is_some_and(|a| {
+                a.row.deliver_deadline_tick > 0
+                    && ship.arrives_tick + road.hold_ticks + AIR_MARGIN_TICKS
+                        > a.row.deliver_deadline_tick
+            });
+            let hold_cost = road.hold_ticks * ROAD_TICK_VALUE;
+            (!late && hold_cost < wear_cost).then_some("hold")
+        }
+        "debris" => {
+            let price = ship.fuel_price.max(1);
+            let burn_cost = road.fuel * price;
+            // Burning must leave the tank no emptier than the critical line.
+            let tank_ok = (ship.fuel - road.fuel) as f64
+                >= ship.fuel_capacity.max(1) as f64 * LOW_FUEL;
+            (tank_ok && burn_cost < wear_cost).then_some("burn")
+        }
+        _ => None,
     }
 }
 
@@ -1489,6 +1660,7 @@ mod tests {
             fuel_price: 0,
             credits: 10_000,
             denied: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -1512,6 +1684,117 @@ mod tests {
 
     fn pumps(names: &[&str]) -> BTreeSet<String> {
         names.iter().map(|s| s.to_string()).collect()
+    }
+
+    // ── booking in the air (ucf-exchange#74) and the road (metal#107) ────────
+
+    fn flying_to(end: &str, arrives_in: i64, fuel: i64) -> Ship {
+        let mut s = ship_at("x", fuel);
+        s.docked = None;
+        s.in_flight = true;
+        s.bound_for = Some(end.into());
+        s.arrives_tick = s.tick + arrives_in;
+        s
+    }
+
+    #[test]
+    fn a_light_hull_books_her_next_job_before_she_lands() {
+        let ship = flying_to("b", 5, 500);
+        let board = [load("L1", "b", "c", 400, (5, 10))];
+        let d = decide(&ship, None, &board, &pumps(&["b"]), &FlatRouter(20));
+        assert_eq!(d, Decision::Book { load_id: "L1".into() });
+    }
+
+    #[test]
+    fn a_landing_too_far_off_for_the_pickup_window_books_nothing() {
+        // 40 ticks still to fly + engage 4 + loading 8 + margin 6 > the desk's 48.
+        let ship = flying_to("b", 40, 500);
+        let board = [load("L1", "b", "c", 400, (40, 10))];
+        let d = decide(&ship, None, &board, &pumps(&["b"]), &FlatRouter(20));
+        assert!(matches!(d, Decision::Hold { .. }), "{d:?}");
+    }
+
+    #[test]
+    fn laden_to_her_delivery_she_books_only_what_loads_where_she_lands() {
+        let mut ship = flying_to("b", 5, 500);
+        ship.hold_used = 25;
+        let active = laden("A", "a", "b");
+        // The richer load starts elsewhere; the one at her delivery berth wins.
+        let board = [load("FAR", "c", "d", 9_000, (10, 10)), load("HERE", "b", "d", 300, (5, 10))];
+        let d = decide(&ship, Some(&active), &board, &pumps(&["b"]), &FlatRouter(20));
+        assert_eq!(d, Decision::Book { load_id: "HERE".into() });
+    }
+
+    #[test]
+    fn a_deadhead_under_contract_books_nothing_in_the_air() {
+        let ship = flying_to("a", 5, 500);
+        let booked = Active {
+            row: load("A", "a", "b", 500, (5, 10)),
+            word: ActiveWord::Booked,
+        };
+        let board = [load("L1", "a", "c", 400, (5, 10))];
+        let d = decide(&ship, Some(&booked), &board, &pumps(&["a"]), &FlatRouter(20));
+        assert!(matches!(d, Decision::Hold { .. }), "{d:?}");
+    }
+
+    #[test]
+    fn no_course_end_or_no_booking_rights_means_no_booking_in_the_air() {
+        let board = [load("L1", "b", "c", 400, (5, 10))];
+        let mut unknown = flying_to("b", 5, 500);
+        unknown.bound_for = None;
+        assert!(matches!(
+            decide(&unknown, None, &board, &pumps(&["b"]), &FlatRouter(20)),
+            Decision::Hold { .. }
+        ));
+        let mut copilot = flying_to("b", 5, 500);
+        copilot.denied = vec!["book".into()];
+        assert!(matches!(
+            decide(&copilot, None, &board, &pumps(&["b"]), &FlatRouter(20)),
+            Decision::Hold { .. }
+        ));
+    }
+
+    fn road(kind: &str, wear: i64, fuel: i64, hold: i64) -> Option<RoadEvent> {
+        Some(RoadEvent { kind: kind.into(), wear_bps: wear, fuel, hold_ticks: hold })
+    }
+
+    #[test]
+    fn a_leased_hull_punches_through_because_the_yard_pays_for_wear() {
+        let mut ship = flying_to("b", 10, 500);
+        ship.leased = true;
+        ship.road = road("storm", 2_000, 0, 10);
+        assert_eq!(answer_road(&ship, None), None, "the default (punch) stands");
+    }
+
+    #[test]
+    fn a_titled_hull_stands_off_a_storm_when_the_wait_is_cheaper_than_the_yard() {
+        let mut ship = flying_to("b", 10, 500);
+        ship.road = road("storm", 2_000, 0, 10); // wear ℳ800 vs 10 ticks ≈ ℳ100
+        assert_eq!(answer_road(&ship, None), Some("hold"));
+        // ...but never past a delivery deadline.
+        let mut due = laden("A", "a", "b");
+        due.row.deliver_deadline_tick = ship.arrives_tick + 5;
+        assert_eq!(answer_road(&ship, Some(&due)), None);
+        // ...and a drive already fully worn cannot wear further.
+        ship.wear_bps = 10_000;
+        assert_eq!(answer_road(&ship, None), None);
+    }
+
+    #[test]
+    fn debris_is_burned_around_only_on_a_tank_that_can_spare_it() {
+        let mut ship = flying_to("b", 10, 500);
+        ship.fuel_price = 2;
+        ship.road = road("debris", 1_000, 50, 0); // wear ℳ400 vs fuel ℳ100
+        assert_eq!(answer_road(&ship, None), Some("burn"));
+        ship.fuel = 250; // 200 left < 40% of 600
+        assert_eq!(answer_road(&ship, None), None);
+    }
+
+    #[test]
+    fn cargo_is_left_to_the_manifest_this_pilot_carries_no_bills() {
+        let mut ship = flying_to("b", 10, 500);
+        ship.road = road("cargo", 0, 30, 0);
+        assert_eq!(answer_road(&ship, None), None);
     }
 
     // ── the tour planner ────────────────────────────────────────────────────

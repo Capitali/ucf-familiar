@@ -63,9 +63,9 @@ public struct TemplatedVoice {
         case "refused-at-the-door", "exchange-unreachable", "trade-refused", "pay-down-refused", "hull-changed": return 8
         case "proposed", "proposal-lapsed": return 7
         case "traded", "position-opened", "load-closed", "outfitted", "trade-outcome", "fill", "paid-down", "frame-expanded", "order-done": return 6
-        case "advice", "carry-blocked", "carry-refused", "engage-refused", "refit-refused", "book-corrected", "retargeted": return 5
-        case "acted", "engaged-drive", "carry-to-market", "unwedged-course", "adopted-held-contract", "freight", "order-underway", "hull-restored", "papers": return 4
-        case "held-at-the-gate", "watch-begins", "forecast", "dispatch", "fleet-inbound", "order-waits", "under-orders", "tour": return 3
+        case "advice", "carry-blocked", "carry-refused", "engage-refused", "refit-refused", "book-corrected", "retargeted", "road-refused": return 5
+        case "acted", "engaged-drive", "carry-to-market", "unwedged-course", "adopted-held-contract", "freight", "order-underway", "hull-restored", "papers", "road-answered": return 4
+        case "held-at-the-gate", "watch-begins", "forecast", "dispatch", "fleet-inbound", "order-waits", "under-orders", "tour", "road-default": return 3
         case "holding", "merchant-idle", "outfit-idle", "awaiting-pending-actions", "awaiting-our-own-fold": return 0
         // Unknown: shown, neutrally — except that a word the runner ends in "-refused" is a
         // refusal at the door whatever else it is, and outranks routine (the safe rule for a
@@ -334,6 +334,12 @@ public struct TemplatedVoice {
             return "\(t(e)): course to \(s("to")) unwedged, arrives t\(i("resolves"))"
         case "engage-refused":
             return "\(t(e)): engage refused — \(s("why"))"
+        case "road-answered":
+            return "\(t(e)): the road — a \(s("kind")), answered \(s("choice")) (\(i("wear_bps")) bps wear, \(i("fuel")) fuel, \(i("hold_ticks")) ticks on offer)"
+        case "road-default":
+            return "\(t(e)): the road — a \(s("kind")), left to its default: \(s("why"))"
+        case "road-refused":
+            return "\(t(e)): the road — answering the \(s("kind")) with \(s("choice")) refused — \(s("why"))"
         case "advice":
             return "\(t(e)): \(have()) advised [\(s("surface"))]: \(s("would")) — \(s("why")); I did nothing"
         case "proposed":

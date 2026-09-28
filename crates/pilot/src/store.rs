@@ -107,8 +107,10 @@ pub const COPILOT_KEY_VAR: &str = "UCF_COPILOT_KEY";
 /// Every verb a co-pilot key cannot file. The exchange lets a co-pilot travel, book,
 /// cancel a booking, collect, refuel and engage (`copilotVerbs`), and nothing else:
 /// no trading, no yard, no crew, no lease, no tanker, and no ship change.
-pub const COPILOT_DENIED: [&str; 10] = [
+pub const COPILOT_DENIED: [&str; 12] = [
     "repair",
+    "road",
+    "duty",
     "paws",
     "refit",
     "payLease",

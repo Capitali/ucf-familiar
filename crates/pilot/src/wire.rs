@@ -23,6 +23,7 @@ pub fn ship_from(me: &Value, repair_rate: i64) -> Ship {
         .map(|r| r.len())
         .unwrap_or(0);
     let docked = me.get("docked").and_then(Value::as_str).map(String::from);
+    let docked_now = docked.is_some();
     // Under way = NOT berthed. PROD reports `route: []` DURING a crossing (the
     // transit rides arrival ticks, not the route array), so keying flight on a
     // non-empty route read a flying ship as "adrift between folds" and held on a
@@ -76,7 +77,42 @@ pub fn ship_from(me: &Value, repair_rate: i64) -> Ship {
         fuel_price: me.get("fuelPrice").and_then(Value::as_i64).unwrap_or(0),
         credits: me.get("credits").and_then(Value::as_i64).unwrap_or(0),
         denied: Vec::new(),
+        // Where the course ENDS: the last hop still on the route, else this leg's own
+        // stop. `enRouteTo` is only the current leg — mid multi-hop (LOCAL, t241008:
+        // enRouteTo tuna-prime, route [tranquility]) it names a berth she only passes.
+        // Only under way; a berthed hull is bound nowhere.
+        bound_for: if docked_now {
+            None
+        } else {
+            me.get("route")
+                .and_then(Value::as_array)
+                .and_then(|r| r.last())
+                .and_then(Value::as_str)
+                .map(String::from)
+                .or_else(|| me.get("enRouteTo").and_then(Value::as_str).map(String::from))
+        },
+        arrives_tick: if docked_now {
+            0
+        } else {
+            me.get("arriveTick").and_then(Value::as_i64).unwrap_or(0)
+        },
+        road: road_from(me),
     }
+}
+
+/// This leg's road event, revealed and not yet answered (`/v1/me.road`, metal#107).
+pub fn road_from(me: &Value) -> Option<doctrine::RoadEvent> {
+    let r = me.get("road")?;
+    if r.get("answered").is_some_and(|a| !a.is_null()) {
+        return None;
+    }
+    let n = |k: &str| r.get(k).and_then(Value::as_i64).unwrap_or(0);
+    Some(doctrine::RoadEvent {
+        kind: r.get("kind")?.as_str()?.to_string(),
+        wear_bps: n("wearBps"),
+        fuel: n("fuel"),
+        hold_ticks: n("holdTicks"),
+    })
 }
 
 /// One `/v1/loadboard` row as the doctrine prices it.
@@ -817,6 +853,31 @@ mod seam_parity_tests {
 
     /// Every actionable decision explains itself with a code and the numbers that
     /// chose it — not only Hold (finding 4).
+    #[test]
+    fn the_course_ends_at_the_last_hop_not_at_this_legs_stop() {
+        let me = json!({"tick": 100, "enRouteTo": "tuna-prime", "arriveTick": 113,
+                        "route": ["tranquility"], "fuel": 244, "fuelCapacity": 600});
+        let ship = ship_from(&me, 40);
+        assert!(ship.in_flight);
+        assert_eq!(ship.bound_for.as_deref(), Some("tranquility"));
+        assert_eq!(ship.arrives_tick, 113);
+        let one_leg = json!({"tick": 100, "enRouteTo": "cannery-row", "arriveTick": 108, "route": []});
+        assert_eq!(ship_from(&one_leg, 40).bound_for.as_deref(), Some("cannery-row"));
+        let berthed = json!({"tick": 100, "docked": "cannery-row", "enRouteTo": "x", "route": []});
+        assert_eq!(ship_from(&berthed, 40).bound_for, None);
+    }
+
+    #[test]
+    fn a_revealed_unanswered_road_event_is_read_and_an_answered_one_is_not() {
+        let me = json!({"road": {"kind": "storm", "wearBps": 524, "fuel": 0, "holdTicks": 9,
+                                 "choices": ["punch", "hold"], "fallback": "punch"}});
+        let r = road_from(&me).expect("revealed");
+        assert_eq!((r.kind.as_str(), r.wear_bps, r.hold_ticks), ("storm", 524, 9));
+        let answered = json!({"road": {"kind": "storm", "wearBps": 524, "answered": "hold"}});
+        assert_eq!(road_from(&answered), None);
+        assert_eq!(road_from(&json!({})), None);
+    }
+
     #[test]
     fn actionable_decisions_carry_reasons() {
         // Repair: leased, worn past the free-repair line.
