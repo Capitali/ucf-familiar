@@ -763,9 +763,8 @@ pub fn decide_with(
         };
     };
 
-    // Fuel before work when it costs nothing: berthed at a seller, top up — with
-    // money to pay it (a broke hull's refuel is only a refusal at the fold).
-    if pumps.contains(here) && frac(ship.fuel) < TOP_UP_BELOW && can_buy_fuel(ship) {
+    // Fuel before work when it costs nothing: berthed at a seller, top up.
+    if pumps.contains(here) && frac(ship.fuel) < TOP_UP_BELOW {
         return Decision::Refuel;
     }
 
@@ -2680,14 +2679,6 @@ mod tests {
         ship.credits = 10_000;
         let d = decide(&ship, None, &[], &pumps(&["foxys-diner"]), &FlatRouter(7));
         assert!(matches!(d, Decision::DivertToPump { .. }), "{d:?}");
-        // Broke AT the pump: no refuel to be refused, the board decides.
-        let mut at_pump = ship_at("foxys-diner", 175);
-        at_pump.credits = 0;
-        let d = decide(&at_pump, None, &[], &pumps(&["foxys-diner"]), &FlatRouter(7));
-        assert_ne!(d, Decision::Refuel);
-        at_pump.credits = 10_000;
-        let d = decide(&at_pump, None, &[], &pumps(&["foxys-diner"]), &FlatRouter(7));
-        assert_eq!(d, Decision::Refuel);
         // Broke and low: not stranded by the rule.
         ship.credits = 0;
         ship.fuel = 100;
