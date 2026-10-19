@@ -50,6 +50,14 @@ public enum NoticePolicy {
                 add(.hull, "Fitted \(e.string("fitting") ?? "")", "ℳ\(e.int("price") ?? 0) at \(e.string("at_station") ?? "the yard"), \(t)")
             case "paid-down":
                 add(.money, "Paid down ℳ\(e.int("amount") ?? 0) on the lease", "owed ℳ\(e.int("owed_before") ?? 0) before; ℳ\(e.int("credits") ?? 0) in hand, \(t)")
+            case "crew-acted":
+                let act = e.string("act") ?? ""
+                let title = act == "hired"
+                    ? "Signed on \(e["action"]?["name"]?.string ?? "a hand") (\(e["action"]?["station"]?.string ?? "crew"))"
+                    : "Galley: \(act.replacingOccurrences(of: "-", with: " "))"
+                add(.hull, title, "\(e.string("why") ?? "") — ℳ\(e.int("credits") ?? 0), \(t)")
+            case "crew-refused":
+                add(.distress, "Crew act refused", e.string("why") ?? "")
             case "pay-down-refused":
                 add(.distress, "Lease payment refused", "ℳ\(e.int("amount") ?? 0) — \(e.string("why") ?? "")")
             case "trade-refused":

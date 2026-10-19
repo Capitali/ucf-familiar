@@ -60,13 +60,13 @@ public struct TemplatedVoice {
     static func severity(_ e: JournalEntry) -> Int {
         switch e.event {
         case "distress-hold": return 9
-        case "refused-at-the-door", "exchange-unreachable", "trade-refused", "pay-down-refused", "hull-changed": return 8
+        case "refused-at-the-door", "exchange-unreachable", "trade-refused", "pay-down-refused", "crew-refused", "hull-changed": return 8
         case "proposed", "proposal-lapsed": return 7
-        case "traded", "position-opened", "load-closed", "outfitted", "trade-outcome", "fill", "paid-down", "frame-expanded", "order-done": return 6
+        case "traded", "position-opened", "load-closed", "outfitted", "trade-outcome", "fill", "paid-down", "frame-expanded", "order-done", "crew-acted": return 6
         case "advice", "carry-blocked", "carry-refused", "engage-refused", "refit-refused", "book-corrected", "retargeted", "road-refused": return 5
         case "acted", "engaged-drive", "carry-to-market", "unwedged-course", "adopted-held-contract", "freight", "order-underway", "hull-restored", "papers", "road-answered": return 4
         case "held-at-the-gate", "watch-begins", "forecast", "dispatch", "fleet-inbound", "order-waits", "under-orders", "tour", "road-default": return 3
-        case "holding", "merchant-idle", "outfit-idle", "awaiting-pending-actions", "awaiting-our-own-fold": return 0
+        case "holding", "merchant-idle", "outfit-idle", "crew-idle", "awaiting-pending-actions", "awaiting-our-own-fold": return 0
         // Unknown: shown, neutrally — except that a word the runner ends in "-refused" is a
         // refusal at the door whatever else it is, and outranks routine (the safe rule for a
         // future event; the contract test keeps "future" short).
@@ -101,7 +101,7 @@ public struct TemplatedVoice {
     }
 
     /// The runner's chatter — folded into a count, never told one by one.
-    static let chatter: Set<String> = ["holding", "merchant-idle", "outfit-idle", "awaiting-pending-actions", "awaiting-our-own-fold"]
+    static let chatter: Set<String> = ["holding", "merchant-idle", "outfit-idle", "crew-idle", "awaiting-pending-actions", "awaiting-our-own-fold"]
 
     // MARK: the report
 
@@ -279,6 +279,10 @@ public struct TemplatedVoice {
             return "\(t(e)): no refit — \(s("why"))"
         case "paid-down":
             return "\(t(e)): paid ℳ\(i("amount")) down on the lease at \(s("at_station")) (owed ℳ\(i("owed_before")) before) — ℳ\(i("credits"))"
+        case "crew-acted":
+            return "\(t(e)): crew — \(s("act").replacingOccurrences(of: "-", with: " ")) at \(s("at_station")): \(s("why")) — ℳ\(i("credits"))"
+        case "crew-refused":
+            return "\(t(e)): crew act refused — \(s("why"))"
         case "pay-down-refused":
             return "\(t(e)): lease payment of ℳ\(i("amount")) refused — \(s("why"))"
         case "trade-refused":

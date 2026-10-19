@@ -497,8 +497,7 @@ fn next_rung(p: &Purse, beats_rent: Option<String>) -> OutfitDecision {
             };
         }
         return OutfitDecision::Idle {
-            why: "fitted out; crew hiring is the next rung (engine first) — doctrine pending"
-                .into(),
+            why: "fitted out; the crew is the crew doctrine's (ship.crew)".into(),
         };
     }
     OutfitDecision::Idle {

@@ -122,6 +122,18 @@ pub const COPILOT_DENIED: [&str; 12] = [
     "transferCaptain",
 ];
 
+/// What this hull's key may not file THIS fold. The one exception to the papers'
+/// list: a co-pilot may file the yard's free repair on a LEASED hull
+/// (ucf-exchange#82, live 2026-09-30) — the fold reads the title, so no captain's
+/// money moves through the key. A titled hull's repair stays the captain's spend.
+pub fn denied_for(denied: &[String], leased: bool) -> Vec<String> {
+    denied
+        .iter()
+        .filter(|v| !(leased && v.as_str() == "repair"))
+        .cloned()
+        .collect()
+}
+
 /// The human's papers: every key a captain holds on an exchange, filed on the
 /// captain's record (`captains/<id>/papers.json`, 0600 like `ucf.env`).
 ///
@@ -340,6 +352,17 @@ mod papers_tests {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_copilot_repairs_a_leased_hull_and_never_a_titled_one() {
+        let copilot: Vec<String> = COPILOT_DENIED.iter().map(|v| v.to_string()).collect();
+        let leased = denied_for(&copilot, true);
+        assert!(!leased.iter().any(|v| v == "repair"), "#82: the yard's free repair");
+        assert!(leased.iter().any(|v| v == "payLease"), "only repair is excepted");
+        assert_eq!(denied_for(&copilot, false), copilot, "a titled hull's repair is the captain's");
+        assert!(denied_for(&[], true).is_empty(), "the captain's own papers deny nothing");
+    }
+
     use super::*;
     use crate::autonomy::{Level, Surface};
 

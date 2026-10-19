@@ -984,6 +984,8 @@ fn main() -> ExitCode {
     let mut flying_on = String::new();
     // On a co-pilot's papers the merchant and the yard stand down: neither can file.
     let mut on_copilot = false;
+    // Set when the exchange itself refuses a repair this key filed (a world before #82).
+    let mut repair_refused_at_door = false;
     let recipes = reference
         .as_ref()
         .map(chain::parse_recipes)
@@ -1077,6 +1079,11 @@ fn main() -> ExitCode {
     // A refused shift (a bare treasury, a board the fold disagrees about) is not retried
     // every fold: the noticeboard's own clock is the usual answer, this is the backstop.
     let mut duty_cooloff_until: i64 = 0;
+    // The drive's wear, watched fold by fold: the crew doctrine hires an engineer
+    // only on a measured day of it, never on the pack's guess.
+    let mut wear_meter = ucf_pilot::crew::WearMeter::default();
+    let mut last_crew_idle = String::new();
+    let mut crews = true;
     // Road events already answered or journaled (kind|course end|landing tick).
     let mut roads_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut last_pending_note = String::new();
@@ -1249,7 +1256,8 @@ fn main() -> ExitCode {
         // the hull is not yet berthed is a course still being flown, not a hold.
         dial_gate.under_orders =
             ucf_pilot::store::standing_course(&ucf_pilot::store::load_orders(&ship_dir));
-        ship.denied = denied.clone();
+        ship.denied = ucf_pilot::store::denied_for(&denied, ship.leased && !repair_refused_at_door);
+        wear_meter.observe(tick, ship.wear_bps);
         let route_now: Vec<String> = me
             .get("route")
             .and_then(Value::as_array)
@@ -1998,6 +2006,213 @@ fn main() -> ExitCode {
                             last_outfit_idle = why;
                         }
                     }
+                }
+            }
+        }
+
+        // ── The crew phase (Automation::Outfit, `ship.crew`) ────────────────────
+        // Berthed with nothing pending: feed who is aboard, then sign on an engineer
+        // where the ship's own measured wear says one earns twice its keep (#83's
+        // dials; the rules are `crew.rs`). The outfit phase above has first call on
+        // the purse — a fitting is permanent, a hand is a wage.
+        if outfits
+            && crews
+            && !on_copilot
+            && tick >= pending_until
+            && pending_trade.is_none()
+            && !ship.in_flight
+        {
+            if let Some(here) = ship.docked.clone() {
+                use ucf_pilot::crew::{self, CrewDecision, CrewPrices, CrewView, Galley, Hand};
+                let hands: Vec<Hand> = me
+                    .get("crew")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|h| {
+                                Some(Hand {
+                                    name: h.get("name")?.as_str()?.to_string(),
+                                    station: h.get("station")?.as_str()?.to_string(),
+                                    effective_skill_bps: h
+                                        .get("effectiveSkillBps")
+                                        .or_else(|| h.get("skillBps"))
+                                        .and_then(Value::as_i64)
+                                        .unwrap_or(10_000),
+                                    morale_bps: h
+                                        .get("moraleBps")
+                                        .and_then(Value::as_i64)
+                                        .unwrap_or(10_000),
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let g = me.get("galley");
+                let galley = Galley {
+                    on: g.and_then(|g| g.get("on")).and_then(Value::as_bool).unwrap_or(false),
+                    jammed: g
+                        .and_then(|g| g.get("jammed"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    loaf: g.and_then(|g| g.get("loaf")).and_then(Value::as_i64).unwrap_or(0),
+                };
+                let prices = CrewPrices {
+                    hire_cost: param("crewHireCost").unwrap_or(0),
+                    wage_per_day: param("crewWagePerDay").unwrap_or(0),
+                    max_aboard: param("crewMaxAboard").unwrap_or(0),
+                    engine_relief_bps: param("crewEngineWearReliefBps").unwrap_or(0),
+                    hold_relief_bps: param("crewHoldHandlingReliefBps").unwrap_or(0),
+                    galley_credits_per_hand_day: param("galleyCreditsPerHandDay").unwrap_or(0),
+                    galley_loaf_per_hand_day: param("galleyLoafPerHandDay").unwrap_or(0),
+                };
+                let loaf_aboard = ucf_pilot::trade::parse_cargo(&me)
+                    .into_iter()
+                    .filter(|(good, _)| good == crew::LOAF)
+                    .map(|(_, u)| u)
+                    .sum::<i64>();
+                // The berth's loaf quote, read only when the hopper will want it.
+                let hopper_low = !hands.is_empty()
+                    && galley.loaf
+                        < hands.len() as i64
+                            * prices.galley_loaf_per_hand_day
+                            * crew::LOAF_LOW_DAYS;
+                let loaf_ask = if hopper_low && loaf_aboard == 0 {
+                    wire.get(&format!("/v1/stations/{here}/quotes"))
+                        .ok()
+                        .map(|v| ucf_pilot::trade::parse_board(&v))
+                        .and_then(|b| b.into_iter().find(|q| q.good == crew::LOAF))
+                        .filter(|q| q.ask > 0 && q.max_buy > 0)
+                        .map(|q| (q.ask, q.max_buy))
+                } else {
+                    None
+                };
+                let booked_units = active
+                    .as_ref()
+                    .filter(|a| a.word == ActiveWord::Booked)
+                    .map(|a| a.row.units)
+                    .unwrap_or(0);
+                let view = CrewView {
+                    titled: !ship.leased,
+                    docked: true,
+                    credits: ship.credits,
+                    reserve: outfit::RESERVE_DAYS
+                        * (mortgage_per_day
+                            + if ship.leased {
+                                LEASE_SERVICE_PER_DAY_EST
+                            } else {
+                                0
+                            })
+                        + ship.fuel_capacity * FUEL_PRICE_PER_UNIT,
+                    berths: me.get("crewBerths").and_then(Value::as_i64).unwrap_or(0),
+                    prices,
+                    crew: hands,
+                    galley,
+                    loaf_aboard,
+                    loaf_ask,
+                    spare_hold: (ship.hold_capacity - ship.hold_used - booked_units).max(0),
+                    wear_cost_per_day: wear_meter.cost_per_day(tick, repair_rate.max(1)),
+                    wear_watch_from: wear_meter.since(),
+                };
+                let decision = crew::decide_crew(&view);
+                let filing: Option<(Value, String, &str)> = match &decision {
+                    CrewDecision::Idle { .. } => None,
+                    CrewDecision::Hire { name, station, .. } => Some((
+                        json!({"type": "hire", "name": name, "station": station}),
+                        format!("sign {name} on at the {station} post at {here}"),
+                        "hired",
+                    )),
+                    CrewDecision::GalleyOn => Some((
+                        json!({"type": "galley", "on": true}),
+                        "switch the galley on".into(),
+                        "galley-on",
+                    )),
+                    CrewDecision::ServiceGalley => Some((
+                        json!({"type": "galley", "service": true}),
+                        format!("clear the jammed loaf dispenser at {here}"),
+                        "galley-serviced",
+                    )),
+                    CrewDecision::StockGalley { units } => Some((
+                        json!({"type": "galley", "units": units}),
+                        format!("stock the hopper with {units} loaf from the hold"),
+                        "galley-stocked",
+                    )),
+                    CrewDecision::BuyLoaf { units, ask } => Some((
+                        json!({"type": "buy", "station": here, "good": crew::LOAF, "units": units}),
+                        format!("buy {units} kibble-loaf at ℳ{ask} for the galley at {here}"),
+                        "loaf-bought",
+                    )),
+                };
+                match (decision, filing) {
+                    (CrewDecision::Idle { why }, _) => {
+                        if why != last_crew_idle {
+                            journal(
+                                &ship_dir,
+                                json!({"at": now, "tick": tick, "event": "crew-idle", "why": why,
+                                       "credits": ship.credits}),
+                            );
+                            last_crew_idle = why;
+                        }
+                    }
+                    (decision, Some((body, describe, event))) => {
+                        let why = match &decision {
+                            CrewDecision::Hire { why, .. } => why.clone(),
+                            _ => "feed who is aboard: an unfed day costs morale, and morale is \
+                                  skill"
+                                .to_string(),
+                        };
+                        if dial_gate.allow(
+                            &ship_dir,
+                            Surface::ShipCrew,
+                            tick,
+                            now,
+                            &body,
+                            &describe,
+                            &why,
+                        ) {
+                            seq += 1;
+                            let id = format!("whisker-{}-{}", now_secs(), seq);
+                            match wire.act(body.clone(), &id) {
+                                Ok(ack) => {
+                                    pending_until = ack
+                                        .get("resolvesAtTick")
+                                        .and_then(Value::as_i64)
+                                        .unwrap_or(tick)
+                                        + 1;
+                                    journal(
+                                        &ship_dir,
+                                        json!({"at": now, "tick": tick, "event": "crew-acted",
+                                               "act": event, "action": body, "why": why, "at_station": here,
+                                               "credits": ship.credits,
+                                               "resolves": pending_until - 1}),
+                                    );
+                                    last_crew_idle.clear();
+                                    std::thread::sleep(Duration::from_secs(
+                                        (tick_secs * 3 / 5).max(floor_secs),
+                                    ));
+                                    continue;
+                                }
+                                Err(e) => {
+                                    // A verb this key or world cannot file at all stands the
+                                    // crew phase down for the run, said once.
+                                    if e.contains("verb_not_permitted") {
+                                        crews = false;
+                                        journal(
+                                            &ship_dir,
+                                            json!({"at": now, "tick": tick,
+                                                   "event": "automation-refused",
+                                                   "automation": "crew", "why": e}),
+                                        );
+                                    }
+                                    journal(
+                                        &ship_dir,
+                                        json!({"at": now, "tick": tick, "event": "crew-refused",
+                                               "action": body, "why": e}),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    (_, None) => {}
                 }
             }
         }
@@ -3197,6 +3412,11 @@ fn main() -> ExitCode {
                                 Decision::Travel { .. } => "travel",
                                 _ => "",
                             };
+                            // A co-pilot's leased-hull repair is excepted from the papers
+                            // (#82); a world that refuses it anyway has the last word.
+                            if verb == "repair" {
+                                repair_refused_at_door = true;
+                            }
                             if !verb.is_empty() && !denied.iter().any(|v| v == verb) {
                                 denied.push(verb.to_string());
                                 journal(
