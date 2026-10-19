@@ -519,6 +519,17 @@ const REPAIR_COST_PER_HUNDRED_BPS: i64 = 40;
 pub const TOP_UP_BELOW: f64 = 0.9;
 /// Below this fraction, an idle ship diverts to a pump before taking work.
 const LOW_FUEL: f64 = 0.4;
+
+/// Fuel a purse must be able to buy before a pump is worth a trip: below it the
+/// hull is broke, and a pump is a berth like any other. A hull the captain has just
+/// stepped off carries ℳ0 (the purse goes with them, metal#100): KBC-03, 2026-10-19,
+/// diverted to foxy's-diner on 190 of 600 with nothing to pay the pump with.
+const BROKE_BELOW_UNITS: i64 = 50;
+
+/// Can this purse buy a meaningful top-up? An unknown price is read as one credit a unit.
+fn can_buy_fuel(ship: &Ship) -> bool {
+    ship.credits >= BROKE_BELOW_UNITS * ship.fuel_price.max(1)
+}
 /// Below this fraction, nothing matters but the tanker.
 pub const CRITICAL_FUEL: f64 = 0.05;
 /// How many top board rows get route-priced. A route call per row would be impolite.
@@ -843,6 +854,14 @@ pub fn decide_with(
     // shuttling to foxy's-diner on 97% — and foxy's is the corner where the freight
     // is out of pickup range, so both hulls ended up parked there with nothing to do.
     // A ship with a full tank and no work has a position problem, not a fuel problem.
+    // A broke hull on a working tank waits where it is for work its tank can fly:
+    // at the pump it could buy nothing, and the trip burns what it has.
+    if !can_buy_fuel(ship) && frac(ship.fuel) >= LOW_FUEL {
+        return Decision::Hold {
+            why: "no work this tank can fly, and no money for a pump — waiting for the board"
+                .into(),
+        };
+    }
     if frac(ship.fuel) < LOW_FUEL
         || (!pumps.is_empty() && !pumps.contains(here) && frac(ship.fuel) < TOP_UP_BELOW)
     {
@@ -957,8 +976,11 @@ fn bookable_from(
     let whole = ((dead + haul + onward) as f64 * RESERVE) as i64;
     let dead_only = (dead as f64 * RESERVE) as i64;
     let haul_only = ((haul + onward) as f64 * RESERVE) as i64;
+    // Filling up at the origin is a plan only for a purse that can pay the pump;
+    // after the delivery the hull is paid, so the onward leg stands as it is.
     ship.fuel >= whole
         || (pumps.contains(l.origin.as_str())
+            && can_buy_fuel(ship)
             && ship.fuel >= dead_only
             && ship.fuel_capacity >= haul_only)
 }
@@ -2640,6 +2662,28 @@ mod tests {
         assert_eq!(tanker_bill(2_000_000, 465, 2), 1_860 + 250);
         // The floor holds however close you are.
         assert_eq!(tanker_bill(0, 0, 2), 250);
+    }
+
+    /// A hull the captain has just stepped off carries ℳ0 (the purse goes with them).
+    /// KBC-03 at velvet-array, 2026-10-19: 190 of 600, no fuelable work, and it set
+    /// off for foxy's-diner's pump with nothing to pay it. Broke on a working tank,
+    /// it waits for the board; broke on a low one it still goes (the tanker or a
+    /// pump is the only way out, and freight pay can follow).
+    #[test]
+    fn a_broke_hull_does_not_go_to_a_pump_it_cannot_pay() {
+        let mut ship = ship_at("velvet-array", 306);
+        ship.credits = 0;
+        let d = decide(&ship, None, &[], &pumps(&["foxys-diner"]), &FlatRouter(7));
+        assert!(matches!(d, Decision::Hold { .. }), "{d:?}");
+        // Paid, the same hull goes to the pump as it always did.
+        ship.credits = 10_000;
+        let d = decide(&ship, None, &[], &pumps(&["foxys-diner"]), &FlatRouter(7));
+        assert!(matches!(d, Decision::DivertToPump { .. }), "{d:?}");
+        // Broke and low: not stranded by the rule.
+        ship.credits = 0;
+        ship.fuel = 100;
+        let d = decide(&ship, None, &[], &pumps(&["foxys-diner"]), &FlatRouter(7));
+        assert!(!matches!(d, Decision::Hold { .. }), "{d:?}");
     }
 
     /// A full tank at a pumpless berth stays put. The shuttle exists to make plans
