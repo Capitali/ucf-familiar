@@ -257,18 +257,28 @@ fn sign_copilot(ships: &[Ship], target: &str, replace: bool) -> ExitCode {
     let mut papers = store::load_papers(&cdir);
 
     // Never sign over a co-pilot we already fly on: minting retires every live
-    // co-pilot of the hull, and this one may be the key the pilot is using.
-    if let Some(p) = papers
+    // co-pilot of the hull, and this one may be the key the pilot is using. A
+    // co-pilot the exchange no longer honours (KBC-04's, 2026-10: "not on the
+    // books") is no co-pilot at all — its paper is struck and a new one signed.
+    let held: Vec<(String, bool)> = papers
         .keys
         .iter()
-        .find(|p| !p.is_captain() && p.hull_actor == want)
-    {
+        .filter(|p| !p.is_captain() && p.hull_actor == want)
+        .map(|p| (p.key_id.clone(), read_key(&p.server, &p.secret).is_some()))
+        .collect();
+    if let Some((id, _)) = held.iter().find(|(_, live)| *live) {
         println!(
-            "fleet papers: {} already holds its co-pilot ({}); nothing signed",
-            s.captain.hull_name, p.key_id
+            "fleet papers: {} already holds its co-pilot ({id}); nothing signed",
+            s.captain.hull_name
         );
         return ExitCode::SUCCESS;
     }
+    for (id, _) in &held {
+        println!("  co-pilot {id} no longer answers on the exchange — struck from the papers");
+    }
+    papers
+        .keys
+        .retain(|p| p.is_captain() || p.hull_actor != want);
     let Some(captain_key) = captain_key_for(&papers, &server, &want) else {
         eprintln!(
             "fleet papers: none of the captain's own keys answers for {} right now — a \
