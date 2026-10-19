@@ -195,6 +195,12 @@ fn candidate_papers(ship_dir: &Path, server: &str) -> Vec<Candidate> {
     out
 }
 
+/// The exchange answered and refused the key itself (revoked, never enrolled):
+/// another of the captain's papers may still fly the hull.
+fn refused_key(e: &str) -> bool {
+    e.contains(": HTTP 401 ") || e.contains(": HTTP 403 ")
+}
+
 /// What the fold flies on.
 enum Selection {
     /// `me` as the chosen key answers it; `captain` = the captain's own papers.
@@ -216,6 +222,8 @@ enum Selection {
 fn select_papers(wire: &Wire, candidates: &mut [Candidate], want: Option<&str>) -> Selection {
     let mut answers: Vec<(bool, String)> = Vec::new();
     let mut mes: Vec<Value> = Vec::new();
+    let candidates_len = candidates.len();
+    let mut first_refusal: Option<String> = None;
     for (i, c) in candidates.iter_mut().enumerate() {
         wire.set_key(&c.secret);
         if c.captain.is_none() {
@@ -227,8 +235,16 @@ fn select_papers(wire: &Wire, candidates: &mut [Candidate], want: Option<&str>) 
         }
         let me = match wire.get("/v1/me") {
             Ok(v) => v,
-            Err(e) if i == 0 => return Selection::Unreachable(e),
-            Err(_) => Value::Null,
+            // A key the exchange refuses is not an unreachable exchange: KBC-04's own
+            // key went "not on the books" (2026-10) and the captain's papers, further
+            // down the list, are what fly her once the captain is aboard.
+            Err(e) if i == 0 && (!refused_key(&e) || candidates_len == 1) => {
+                return Selection::Unreachable(e)
+            }
+            Err(e) => {
+                first_refusal.get_or_insert(e);
+                Value::Null
+            }
         };
         let actor = me
             .get("actor")
@@ -265,12 +281,18 @@ fn select_papers(wire: &Wire, candidates: &mut [Candidate], want: Option<&str>) 
                 captain: refs[i].0,
             }
         }
+        // Nobody answered at all: there is no hull to hold on, only refusals.
+        None if mes.iter().all(Value::is_null) && first_refusal.is_some() => {
+            Selection::Unreachable(first_refusal.unwrap_or_default())
+        }
         None => {
             if let Some(c) = candidates.first() {
                 wire.set_key(&c.secret);
             }
             Selection::Hold {
-                me: mes.into_iter().next().unwrap_or(Value::Null),
+                // The first key that answered at all: a refused own key answers
+                // nothing, and the wrong-hull check below needs an actor to compare.
+                me: mes.into_iter().find(|m| !m.is_null()).unwrap_or(Value::Null),
             }
         }
     }
@@ -3596,5 +3618,20 @@ mod journal_vocabulary_pin {
             written, listed,
             "journal vocabulary drift: add the new word to tests/fixtures/contract/journal-events.json AND classify it wherever journal words are rendered to the captain"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::refused_key;
+
+    #[test]
+    fn a_refused_key_is_not_an_unreachable_exchange() {
+        assert!(refused_key(
+            "GET /v1/me: HTTP 401 {\"code\":\"not-enrolled\",\"error\":\"You are not on the books yet.\"}"
+        ));
+        assert!(refused_key("GET /v1/me: HTTP 403 {\"error\":\"revoked\"}"));
+        assert!(!refused_key("GET /v1/me: HTTP 503 {}"));
+        assert!(!refused_key("Transport(ConnectionRefused)"));
     }
 }
