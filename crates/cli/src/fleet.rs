@@ -314,6 +314,50 @@ pub(crate) fn resolve_sister(
     }
 }
 
+/// The exchange and the key a ship's own state is read through: the papers its pilot
+/// last said it flies on (the journal's `papers` event). `UCF_KEY` alone read whatever
+/// hull the captain was aboard — the iPad showed all three ships as KBC-04 (2026-10-20),
+/// two through captain-profile keys and one through a dead key. `UCF_KEY` still where
+/// the pilot has not said, or no longer holds the key it named.
+pub(crate) fn hull_papers(s: &Ship) -> (String, String) {
+    let env = s.dir.join("ucf.env");
+    let server = read_env_value(&env, "UCF_SERVER").unwrap_or_else(|| s.captain.server.clone());
+    let own = read_env_value(&env, "UCF_KEY").unwrap_or_default();
+    let Some(id) = flying_key_id(&s.dir) else {
+        return (server, own);
+    };
+    let mut held = vec![own.clone()];
+    held.extend(read_env_value(&env, ucf_pilot::store::COPILOT_KEY_VAR));
+    if let Some(cd) = ucf_pilot::store::captain_dir(&s.dir, &s.captain.captain_id) {
+        held.extend(
+            ucf_pilot::store::load_papers(&cd)
+                .keys
+                .into_iter()
+                .filter(|p| p.server.trim_end_matches('/') == server.trim_end_matches('/'))
+                .map(|p| p.secret),
+        );
+    }
+    let key = held
+        .into_iter()
+        .find(|k| !k.is_empty() && k.trim_start_matches("ucfk_").starts_with(&id))
+        .unwrap_or(own);
+    (server, key)
+}
+
+/// The key id of the pilot's latest `papers` event, if it has ever written one.
+fn flying_key_id(ship_dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(ship_dir.join("journal.jsonl")).ok()?;
+    text.lines()
+        .rev()
+        .filter(|l| l.contains("\"papers\""))
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|v| v.get("event").and_then(Value::as_str) == Some("papers"))?
+        .get("key")?
+        .as_str()
+        .filter(|k| !k.is_empty())
+        .map(String::from)
+}
+
 pub(crate) fn last_journal_line(ship_dir: &Path) -> Option<Value> {
     let text = std::fs::read_to_string(ship_dir.join("journal.jsonl")).ok()?;
     text.lines()
@@ -2222,9 +2266,7 @@ pub fn cmd_fleet(args: &[String]) -> ExitCode {
                 };
                 let e = by_captain.entry(key).or_default();
                 e.0 = s.captain.captain.clone();
-                let secret = read_env_value(&s.dir.join("ucf.env"), "UCF_KEY").unwrap_or_default();
-                let server = read_env_value(&s.dir.join("ucf.env"), "UCF_SERVER")
-                    .unwrap_or_else(|| s.captain.server.clone());
+                let (server, secret) = hull_papers(s);
                 let cash = wire_get(&server, &secret, "/v1/cash").ok();
                 e.1.push(super::economy::for_ship_with_cash(
                     &s.dir,
@@ -2269,9 +2311,7 @@ pub fn cmd_fleet(args: &[String]) -> ExitCode {
             let mut disagreements = 0usize;
             let mut failures = 0usize;
             for s in &ships {
-                let key = read_env_value(&s.dir.join("ucf.env"), "UCF_KEY").unwrap_or_default();
-                let server = read_env_value(&s.dir.join("ucf.env"), "UCF_SERVER")
-                    .unwrap_or_else(|| s.captain.server.clone());
+                let (server, key) = hull_papers(s);
                 let me = wire_get(&server, &key, "/v1/me").ok();
                 let wire_ship = me
                     .as_ref()
@@ -2575,9 +2615,7 @@ pub fn cmd_fleet(args: &[String]) -> ExitCode {
             // captains whose names slug alike are two captains with two books.
             let mut per_captain: BTreeMap<String, CaptainBook> = BTreeMap::new();
             for s in &ships {
-                let key = read_env_value(&s.dir.join("ucf.env"), "UCF_KEY").unwrap_or_default();
-                let server = read_env_value(&s.dir.join("ucf.env"), "UCF_SERVER")
-                    .unwrap_or_else(|| s.captain.server.clone());
+                let (server, key) = hull_papers(s);
                 let me = wire_get(&server, &key, "/v1/me").ok();
                 // Journal ∪ wire, deduplicated: the journal is the long memory, the
                 // wire's day-window catches a fill the pilot never read back (a

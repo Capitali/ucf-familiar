@@ -29,9 +29,9 @@ use serde_json::{json, Value};
 use ucf_pilot::autonomy::{Approval, Dial, Level, Surface};
 
 use super::fleet::{
-    aboard, computer_state, delivery_totals, estimate_calibration, journal_fills,
-    last_journal_line, lease_expiry, paired_ships, persona_for, pid_alive, read_env_value,
-    trade_book, wire_get, Ship,
+    aboard, computer_state, delivery_totals, estimate_calibration, hull_papers, journal_fills,
+    last_journal_line, lease_expiry, paired_ships, persona_for, pid_alive, trade_book, wire_get,
+    Ship,
 };
 
 const MAX_REQUEST: usize = 64 * 1024;
@@ -165,9 +165,7 @@ type Clocks = BTreeMap<String, Clock>;
 
 fn clock(ship: &Ship, cache: &mut Clocks) -> (i64, i64) {
     let now = super::now_secs();
-    let key = read_env_value(&ship.dir.join("ucf.env"), "UCF_KEY").unwrap_or_default();
-    let server = read_env_value(&ship.dir.join("ucf.env"), "UCF_SERVER")
-        .unwrap_or_else(|| ship.captain.server.clone());
+    let (server, key) = hull_papers(ship);
     if let Some(c) = cache.get(&server) {
         if now - c.at < 30 {
             return (c.tick, c.tick_seconds);
@@ -211,9 +209,7 @@ fn names_for(root: &Path, captain_id: &str, mine: &[&Ship]) -> Vec<Value> {
 }
 
 fn ship_row(s: &Ship, root: &Path, now: i64) -> Value {
-    let key = read_env_value(&s.dir.join("ucf.env"), "UCF_KEY").unwrap_or_default();
-    let server = read_env_value(&s.dir.join("ucf.env"), "UCF_SERVER")
-        .unwrap_or_else(|| s.captain.server.clone());
+    let (server, key) = hull_papers(s);
     let me = wire_get(&server, &key, "/v1/me").ok();
     let g = |k: &str| {
         me.as_ref()
@@ -481,9 +477,7 @@ fn resolve_station(s: &Ship, name: &str) -> Result<String, String> {
         return Err("a station needs a name".into());
     }
     let tight = wanted.replace('-', "");
-    let key = read_env_value(&s.dir.join("ucf.env"), "UCF_KEY").unwrap_or_default();
-    let server = read_env_value(&s.dir.join("ucf.env"), "UCF_SERVER")
-        .unwrap_or_else(|| s.captain.server.clone());
+    let (server, key) = hull_papers(s);
     let Ok(register) = wire_get(&server, &key, "/v1/stations") else {
         return Ok(wanted);
     };
@@ -632,9 +626,7 @@ fn handle(req: Req, dir: &Path, root: &Path, tok: &str, clk: &mut Clocks) -> (u1
             let per_hull: Vec<super::economy::History> = mine
                 .iter()
                 .map(|s| {
-                    let key = read_env_value(&s.dir.join("ucf.env"), "UCF_KEY").unwrap_or_default();
-                    let server = read_env_value(&s.dir.join("ucf.env"), "UCF_SERVER")
-                        .unwrap_or_else(|| s.captain.server.clone());
+                    let (server, key) = hull_papers(s);
                     let cash = wire_get(&server, &key, "/v1/cash").ok();
                     super::economy::for_ship_with_cash(&s.dir, since, cash.as_ref())
                 })
@@ -1001,9 +993,7 @@ fn handle(req: Req, dir: &Path, root: &Path, tok: &str, clk: &mut Clocks) -> (u1
             let Some(s) = find(id) else {
                 return (404, json!({"error": "no such ship"}));
             };
-            let key = read_env_value(&s.dir.join("ucf.env"), "UCF_KEY").unwrap_or_default();
-            let server = read_env_value(&s.dir.join("ucf.env"), "UCF_SERVER")
-                .unwrap_or_else(|| s.captain.server.clone());
+            let (server, key) = hull_papers(s);
             let Ok(me) = wire_get(&server, &key, "/v1/me") else {
                 return (502, json!({"error": "the exchange did not answer"}));
             };
@@ -2093,5 +2083,53 @@ mod surface_tests {
         assert_eq!(code, 410);
         assert_eq!(v["captain_id"], "cpt-1");
         assert!(v.get("candidates").is_none());
+    }
+
+    #[test]
+    fn a_row_reads_the_hull_through_the_papers_its_pilot_flies_on() {
+        let b = base("hull_papers");
+        let s = hull(&b, "KBC-03", "Luke", "cpt-luke");
+        let own = "ucfk_aaaaaaaa0000";
+        let copilot = "ucfk_bbbbbbbb0000";
+        let captain = "ucfk_cccccccc0000";
+        std::fs::write(
+            s.dir.join("ucf.env"),
+            format!("UCF_KEY={own}\nUCF_SERVER=http://127.0.0.1:1\nUCF_COPILOT_KEY={copilot}\n"),
+        )
+        .unwrap();
+        let papers = ucf_pilot::store::CaptainPapers {
+            exchange_captain_id: String::new(),
+            keys: vec![ucf_pilot::store::Paper {
+                server: "http://127.0.0.1:1/".into(),
+                key_id: "cccccccc".into(),
+                secret: captain.into(),
+                kind: "captain".into(),
+                hull_actor: String::new(),
+                hull: String::new(),
+                filed_at: 0,
+            }],
+        };
+        let cd = ucf_pilot::store::captain_dir(&s.dir, "cpt-luke").unwrap();
+        ucf_pilot::store::save_papers(&cd, &papers).unwrap();
+        let journal =
+            |lines: &[&str]| std::fs::write(s.dir.join("journal.jsonl"), lines.join("\n")).unwrap();
+
+        // No word from the pilot yet: the hull's own key.
+        assert_eq!(hull_papers(&s).1, own);
+        // Its co-pilot's, then the captain's, as the pilot says each time it changes.
+        journal(&[
+            r#"{"event":"papers","key":"bbbbbbbb"}"#,
+            r#"{"event":"holding"}"#,
+        ]);
+        assert_eq!(hull_papers(&s).1, copilot);
+        journal(&[
+            r#"{"event":"papers","key":"bbbbbbbb"}"#,
+            r#"{"event":"papers","key":"cccccccc"}"#,
+        ]);
+        assert_eq!(hull_papers(&s).1, captain);
+        // A key no longer held falls back to the hull's own.
+        journal(&[r#"{"event":"papers","key":"dddddddd"}"#]);
+        assert_eq!(hull_papers(&s).1, own);
+        let _ = std::fs::remove_dir_all(&b);
     }
 }
