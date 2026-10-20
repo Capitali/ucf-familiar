@@ -793,6 +793,12 @@ fn handle(req: Req, dir: &Path, root: &Path, tok: &str, clk: &mut Clocks) -> (u1
                         let (t, ts) = clock(s, clk);
                         row["tick"] = json!(t);
                         row["tick_seconds"] = json!(ts);
+                        // Lapsed proposals are not waiting: Kibble Klipper showed "2"
+                        // for two that expired at t8207 and t9241 (seen 2026-10-20).
+                        row["open_proposals"] = json!(proposals_with_state(&s.dir, t)
+                            .into_iter()
+                            .filter(|p| p["state"] == "open")
+                            .count());
                         row
                     })
                     .collect::<Vec<_>>()}),
