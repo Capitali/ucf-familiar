@@ -131,7 +131,7 @@ struct ConnectionsView: View {
                         TextField("name (Luke's fleet)", text: $hostName)
                         TextField("fleet feed URL", text: $feedURL).textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
                         SecureField("feed bearer", text: $bearer)
-                        Button("Add host") { addHost() }.disabled(busy || URL(string: feedURL) == nil || bearer.trimmingCharacters(in: .whitespaces).isEmpty)
+                        Button("Add host") { addHost() }.disabled(busy || URL(string: feedURL) == nil || bearer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         Text("A fleet host runs the pilot (whisker) and serves the fleet feed. Today that is a Mac of yours; in production, a server farm.").font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -190,7 +190,7 @@ struct ConnectionsView: View {
     }
 
     func addHost() {
-        connections.add(.host(name: hostName.isEmpty ? "fleet host" : hostName, feedURL: feedURL), secret: bearer.trimmingCharacters(in: .whitespaces))
+        connections.add(.host(name: hostName.isEmpty ? "fleet host" : hostName, feedURL: feedURL.trimmingCharacters(in: .whitespacesAndNewlines)), secret: bearer.trimmingCharacters(in: .whitespacesAndNewlines))
         bearer = ""; dismiss()
     }
 }
