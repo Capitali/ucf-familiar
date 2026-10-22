@@ -155,6 +155,17 @@ pub(crate) fn plan(state: &CloseOps, hulls: &[Hull]) -> Vec<Step> {
         let Some(w) = hulls.iter().find(|h| &h.world == t) else {
             return release_all(Vec::new());
         };
+        // A hull held for this meeting that the captain has since left (and that is
+        // not the one being fetched) flies on at once.
+        let left: Vec<Step> = state
+            .held
+            .iter()
+            .filter(|h| *h != t && hulls.iter().any(|x| &x.world == *h && !x.aboard))
+            .map(|h| Step::Release { world: h.clone() })
+            .collect();
+        if !left.is_empty() {
+            return left;
+        }
         if w.aboard {
             // Boarded. Repair once the pilot flies the captain's papers (filed sooner,
             // a co-pilot key refuses it and the order waits for good), then let go.
@@ -347,6 +358,7 @@ fn apply(
                     "the meeting is over: fly on".into(),
                 );
             }
+            state.held.retain(|h| h != world);
         }
         Step::Done => {
             *state = CloseOps {
@@ -380,17 +392,22 @@ pub(crate) fn view(mine: &[&Ship]) -> Vec<Hull> {
     let mut hulls = Vec::new();
     for s in mine {
         let (server, key) = crate::fleet::hull_papers(s);
-        // The register through a key of THIS captain's: a co-pilot key answers with its
-        // own captain record, which stands aboard the hull it flies — read through
-        // KBC-03's co-pilot key it put the captain on KBC-03 (2026-10-22).
+        // Who stands where, through the captain's OWN key: a register read through a
+        // co-pilot key says aboard of the hull that key flies, which put the captain
+        // on KBC-03 while he stood on KBC-04 (2026-10-22).
         if register.is_none() {
-            let me = s.captain.exchange_captain_id.as_str();
-            register = crate::fleet::wire_get(&server, &key, "/v1/captain")
-                .ok()
-                .filter(|v| v.get("fleet").is_some())
-                .filter(|v| {
-                    !me.is_empty() && v.get("captainId").and_then(Value::as_str) == Some(me)
-                });
+            if let Some(cd) = ucf_pilot::store::captain_dir(&s.dir, &s.captain.captain_id) {
+                register = ucf_pilot::store::load_papers(&cd)
+                    .keys
+                    .iter()
+                    .filter(|p| p.is_captain())
+                    .filter(|p| p.server.trim_end_matches('/') == server.trim_end_matches('/'))
+                    .find_map(|p| {
+                        crate::fleet::wire_get(&server, &p.secret, "/v1/captain")
+                            .ok()
+                            .filter(|v| v.get("fleet").is_some())
+                    });
+            }
         }
         let Ok(me) = crate::fleet::wire_get(&server, &key, "/v1/me") else {
             continue;
@@ -604,7 +621,13 @@ mod tests {
         let mut w = hull("w", 10_000);
         w.aboard = true;
         w.docked = Some("x".into());
+        // The captain's old hull, held for the meeting, flies on as soon as he leaves it.
         let state = meeting("w", "x", &["w", "c"]);
+        assert_eq!(
+            plan(&state, &[cap_left.clone(), w.clone()]),
+            vec![Step::Release { world: "c".into() }]
+        );
+        let state = meeting("w", "x", &["w"]);
         assert!(plan(&state, &[cap_left.clone(), w.clone()]).is_empty());
         w.captain_papers = true;
         assert_eq!(
@@ -618,11 +641,7 @@ mod tests {
         w.pending.clear();
         assert_eq!(
             plan(&state, &[cap_left, w]),
-            vec![
-                Step::Release { world: "w".into() },
-                Step::Release { world: "c".into() },
-                Step::Done
-            ]
+            vec![Step::Release { world: "w".into() }, Step::Done]
         );
     }
 
