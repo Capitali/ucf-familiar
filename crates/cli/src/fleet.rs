@@ -2861,6 +2861,21 @@ pub fn cmd_fleet(args: &[String]) -> ExitCode {
                 return ExitCode::FAILURE;
             };
             let mut state = super::close_ops::load(&cdir);
+            if f.contains_key("plan") {
+                // Dry run: what the coordinator sees and would file now; nothing is filed.
+                let mine: Vec<&Ship> = ships
+                    .iter()
+                    .filter(|x| x.captain.captain_id == s.captain.captain_id)
+                    .collect();
+                let hulls = super::close_ops::view(&mine);
+                for h in &hulls {
+                    println!("  {h:?}");
+                }
+                let mut probe = state.clone();
+                probe.on = true;
+                println!("  would file: {:?}", super::close_ops::plan(&probe, &hulls));
+                return ExitCode::SUCCESS;
+            }
             match positional.get(1).map(|a| a.as_str()) {
                 None => {}
                 Some("on") => state.on = true,

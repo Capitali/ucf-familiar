@@ -509,7 +509,9 @@ fn berth_word(reply: &Value, hull: &str) -> Berth {
             .is_some_and(|a| a.iter().any(|v| pick(v) == Some(hull)))
     };
     if !listed("berths", &|v| v.as_str())
-        && listed("berthRequestsOut", &|v| v.get("hull").and_then(Value::as_str))
+        && listed("berthRequestsOut", &|v| {
+            v.get("hull").and_then(Value::as_str)
+        })
     {
         Berth::Asked
     } else {

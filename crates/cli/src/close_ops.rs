@@ -132,6 +132,14 @@ pub(crate) fn plan(state: &CloseOps, hulls: &[Hull]) -> Vec<Step> {
     let Some(cap) = hulls.iter().find(|h| h.aboard) else {
         return Vec::new();
     };
+    // The hull the captain stands on repairs first: walking off a worn hull leaves it
+    // worn, since only the captain's papers can repair (a boarding made by hand left
+    // KBC-03 so, 2026-10-22).
+    if cap.worn() && cap.captain_papers && cap.docked.is_some() && !cap.has("repair") {
+        return vec![Step::Repair {
+            world: cap.world.clone(),
+        }];
+    }
     let release_all = |mut steps: Vec<Step>| {
         steps.extend(
             state
@@ -367,7 +375,7 @@ fn note(ship_dir: &Path, now: i64, why: &str) {
 
 /// The hulls of one captain, from the exchange: each through the papers its pilot
 /// flies on, and the register for who stands where.
-fn view(mine: &[&Ship]) -> Vec<Hull> {
+pub(crate) fn view(mine: &[&Ship]) -> Vec<Hull> {
     let mut register: Option<Value> = None;
     let mut hulls = Vec::new();
     for s in mine {
@@ -643,7 +651,34 @@ mod tests {
     fn the_captains_own_hull_is_never_fetched() {
         let mut cap = hull("c", 10_000);
         cap.aboard = true;
-        cap.docked = Some("x".into());
+        cap.bound_for = Some("x".into());
         assert!(plan(&on(), &[cap]).is_empty());
+    }
+
+    #[test]
+    fn a_worn_hull_the_captain_stands_on_repairs_before_the_captain_moves_on() {
+        let mut cap = hull("c", 10_000);
+        cap.aboard = true;
+        cap.docked = Some("x".into());
+        let mut w = hull("w", 10_000);
+        w.docked = Some("x".into());
+        // Papers not yet flipped: nothing for the captain's hull, the meeting may begin.
+        assert_eq!(
+            plan(&on(), &[cap.clone(), w.clone()])[0],
+            Step::Meet {
+                target: "w".into(),
+                station: "x".into()
+            }
+        );
+        cap.captain_papers = true;
+        assert_eq!(
+            plan(&on(), &[cap.clone(), w.clone()]),
+            vec![Step::Repair { world: "c".into() }]
+        );
+        cap.pending = vec!["repair".into()];
+        assert_ne!(
+            plan(&on(), &[cap, w])[0],
+            Step::Repair { world: "c".into() }
+        );
     }
 }
