@@ -14,6 +14,7 @@
 #![recursion_limit = "256"]
 
 mod autonomy_cmd;
+mod close_ops;
 mod economy;
 mod fleet;
 mod fleet_serve;

@@ -358,7 +358,7 @@ fn proposals_with_state(ship_dir: &Path, tick: i64) -> Vec<Value> {
 /// (`repair` | `refuel` | `payLease` | `travel` | `hold`), the station resolved
 /// against the exchange's own register where a course names one, and a course
 /// order superseding the course before it (`store::place_order`).
-fn place_order(
+pub(crate) fn place_order(
     s: &Ship,
     b: &Value,
     now: i64,
@@ -645,6 +645,47 @@ fn handle(req: Req, dir: &Path, root: &Path, tok: &str, clk: &mut Clocks) -> (u1
                     }).collect::<Vec<_>>(),
                     "pooled": super::economy::to_json(&pooled, true),
                 }),
+            )
+        }
+        // Close fleet operations (2026-10-22): the option, and the meeting under way.
+        // `PUT {"on": true|false}` sets it; the supervisor does the rest.
+        ("GET" | "PUT", ["captains", slug, "close-ops"]) => {
+            let Some(s) = ships
+                .iter()
+                .find(|s| !s.captain.captain_id.trim().is_empty() && s.captain.captain_id == *slug)
+            else {
+                return (
+                    404,
+                    json!({"error": "no captain by that identity flies here"}),
+                );
+            };
+            let Some(cdir) = ucf_pilot::store::captain_dir(&s.dir, &s.captain.captain_id) else {
+                return (404, json!({"error": "no captain record"}));
+            };
+            let mut state = super::close_ops::load(&cdir);
+            if req.method == "PUT" {
+                let Some(on) = serde_json::from_slice::<Value>(&req.body)
+                    .ok()
+                    .and_then(|b| b.get("on").and_then(Value::as_bool))
+                else {
+                    return (400, json!({"error": "body is {\"on\": true|false}"}));
+                };
+                state.on = on;
+                if let Err(e) = super::close_ops::save(&cdir, &state) {
+                    return (500, json!({"error": e.to_string()}));
+                }
+            }
+            let target_name = state.target.as_ref().and_then(|t| {
+                ships
+                    .iter()
+                    .find(|x| &x.world.id == t)
+                    .map(|x| x.captain.hull_name.clone())
+            });
+            (
+                200,
+                json!({"on": state.on, "target": state.target, "target_name": target_name,
+                       "station": state.station, "held": state.held, "since": state.since,
+                       "worn_at_bps": super::close_ops::WORN_AT_BPS}),
             )
         }
         ("GET", ["captains", slug, "brief"]) => {
@@ -1882,6 +1923,31 @@ mod surface_tests {
         );
         assert_eq!(row["persona"]["name"], "Felix");
         assert_eq!(row["computer_state"]["pronouns"]["label"], pron.label);
+    }
+
+    /// Close fleet operations is a captain's option on the feed: off until put on.
+    #[test]
+    fn close_fleet_operations_is_put_on_and_read_back_on_the_feed() {
+        let b = base("closeops");
+        let _s = hull(&b, "One", "Luke", "cpt-c");
+        let call = |method: &str, body: &str| {
+            let req = Req {
+                method: method.into(),
+                path: "/captains/cpt-c/close-ops".into(),
+                query: BTreeMap::new(),
+                bearer: Some("tok".into()),
+                body: body.as_bytes().to_vec(),
+            };
+            handle(req, &b, &b.join("worlds"), "tok", &mut Clocks::new())
+        };
+        let (code, v) = call("GET", "");
+        assert_eq!(code, 200, "{v}");
+        assert_eq!(v["on"], false);
+        let (code, v) = call("PUT", r#"{"on":true}"#);
+        assert_eq!(code, 200, "{v}");
+        assert_eq!(v["on"], true);
+        assert_eq!(call("GET", "").1["on"], true);
+        assert_eq!(call("PUT", r#"{"on":"yes"}"#).0, 400);
     }
 
     /// Orders are placed, listed and withdrawn on the feed, and counted on the row.

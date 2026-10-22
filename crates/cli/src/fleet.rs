@@ -358,6 +358,33 @@ fn flying_key_id(ship_dir: &Path) -> Option<String> {
         .map(String::from)
 }
 
+/// A ship of the captain named by record id (`cpt-…`) or by name, folded.
+pub(crate) fn captain_ship<'a>(ships: &'a [Ship], who: &str) -> Option<&'a Ship> {
+    let fold = |t: &str| {
+        t.chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect::<String>()
+            .to_lowercase()
+    };
+    ships.iter().find(|s| {
+        !s.captain.captain_id.is_empty()
+            && (s.captain.captain_id == who || fold(&s.captain.captain) == fold(who))
+    })
+}
+
+/// What kind of papers the pilot last said it flies on (`captain` | `co-pilot`).
+pub(crate) fn flying_papers(ship_dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(ship_dir.join("journal.jsonl")).ok()?;
+    text.lines()
+        .rev()
+        .filter(|l| l.contains("\"papers\""))
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|v| v.get("event").and_then(Value::as_str) == Some("papers"))?
+        .get("papers")?
+        .as_str()
+        .map(String::from)
+}
+
 pub(crate) fn last_journal_line(ship_dir: &Path) -> Option<Value> {
     let text = std::fs::read_to_string(ship_dir.join("journal.jsonl")).ok()?;
     text.lines()
@@ -2818,6 +2845,62 @@ pub fn cmd_fleet(args: &[String]) -> ExitCode {
                 .unwrap_or_else(|| "127.0.0.1:7899".to_string());
             super::fleet_serve::serve(&dir, &root, &bind)
         }
+        // ── close-ops: the captain walked hull to hull to keep the drives repaired ──
+        "close-ops" => {
+            let ships = paired_ships(&dir, &root);
+            let Some(who) = positional.first() else {
+                eprintln!("fleet close-ops <captain> [on|off]");
+                return ExitCode::FAILURE;
+            };
+            let Some(s) = captain_ship(&ships, who) else {
+                eprintln!("fleet close-ops: no captain {who} flies here");
+                return ExitCode::FAILURE;
+            };
+            let Some(cdir) = ucf_pilot::store::captain_dir(&s.dir, &s.captain.captain_id) else {
+                eprintln!("fleet close-ops: {who} has no captain record");
+                return ExitCode::FAILURE;
+            };
+            let mut state = super::close_ops::load(&cdir);
+            match positional.get(1).map(|a| a.as_str()) {
+                None => {}
+                Some("on") => state.on = true,
+                Some("off") => {
+                    state.on = false;
+                    if state.target.is_some() {
+                        println!(
+                            "  the meeting under way stays as filed; its holds are yours to resume"
+                        );
+                    }
+                }
+                Some(other) => {
+                    eprintln!("fleet close-ops: on or off, not {other}");
+                    return ExitCode::FAILURE;
+                }
+            }
+            if positional.len() > 1 {
+                if let Err(e) = super::close_ops::save(&cdir, &state) {
+                    eprintln!("fleet close-ops: {e}");
+                    return ExitCode::FAILURE;
+                }
+            }
+            println!(
+                "close fleet operations for {}: {}{}",
+                s.captain.captain,
+                if state.on { "ON" } else { "off" },
+                match (&state.target, &state.station) {
+                    (Some(t), Some(st)) => format!(
+                        " — bringing the captain to {} at {st}",
+                        ships
+                            .iter()
+                            .find(|x| &x.world.id == t)
+                            .map(|x| x.captain.hull_name.as_str())
+                            .unwrap_or(t)
+                    ),
+                    _ => String::new(),
+                }
+            );
+            ExitCode::SUCCESS
+        }
         "run" => {
             let renew = f.contains_key("renew");
             let allow_paws = f.contains_key("allow-paws");
@@ -2928,6 +3011,8 @@ pub fn cmd_fleet(args: &[String]) -> ExitCode {
                         }
                     }
                 }
+                // Close fleet operations: the captain walked to whichever hull is worn.
+                super::close_ops::pass(&root, &paired_ships(&dir, &root));
                 if once {
                     break;
                 }
@@ -2936,7 +3021,7 @@ pub fn cmd_fleet(args: &[String]) -> ExitCode {
             ExitCode::SUCCESS
         }
         other => {
-            eprintln!("fleet: unknown subcommand `{other}` — pair | unpair | status | captains | economy | order | orders | names | papers | fleet-name | adopt-ids | rename | hull | choose | run | serve");
+            eprintln!("fleet: unknown subcommand `{other}` — pair | unpair | status | captains | economy | order | orders | names | papers | fleet-name | adopt-ids | rename | hull | choose | close-ops | run | serve");
             ExitCode::FAILURE
         }
     }
