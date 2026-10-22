@@ -380,10 +380,17 @@ pub(crate) fn view(mine: &[&Ship]) -> Vec<Hull> {
     let mut hulls = Vec::new();
     for s in mine {
         let (server, key) = crate::fleet::hull_papers(s);
+        // The register through a key of THIS captain's: a co-pilot key answers with its
+        // own captain record, which stands aboard the hull it flies — read through
+        // KBC-03's co-pilot key it put the captain on KBC-03 (2026-10-22).
         if register.is_none() {
+            let me = s.captain.exchange_captain_id.as_str();
             register = crate::fleet::wire_get(&server, &key, "/v1/captain")
                 .ok()
-                .filter(|v| v.get("fleet").is_some());
+                .filter(|v| v.get("fleet").is_some())
+                .filter(|v| {
+                    !me.is_empty() && v.get("captainId").and_then(Value::as_str) == Some(me)
+                });
         }
         let Ok(me) = crate::fleet::wire_get(&server, &key, "/v1/me") else {
             continue;
