@@ -30,6 +30,9 @@ pub(crate) const FILE: &str = "close-ops.json";
 /// Who the orders say gave them.
 pub(crate) const BY: &str = "close fleet operations";
 
+/// How long a done board or repair still counts as in flight: two ticks at 180 s.
+const SETTLE_SECS: i64 = 360;
+
 /// The option and the meeting under way, per captain.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct CloseOps {
@@ -388,6 +391,7 @@ fn note(ship_dir: &Path, now: i64, why: &str) {
 /// The hulls of one captain, from the exchange: each through the papers its pilot
 /// flies on, and the register for who stands where.
 pub(crate) fn view(mine: &[&Ship]) -> Vec<Hull> {
+    let now = crate::now_secs();
     let mut register: Option<Value> = None;
     let mut hulls = Vec::new();
     for s in mine {
@@ -429,9 +433,12 @@ pub(crate) fn view(mine: &[&Ship]) -> Vec<Hull> {
                 .get("contracts")
                 .and_then(Value::as_array)
                 .is_some_and(|c| !c.is_empty()),
+            // An order done but not yet settled still counts: the register and the
+            // wear lag a tick behind, and a board re-filed in that gap was a second
+            // boarding from a hull the captain had left (2026-10-22).
             pending: ucf_pilot::store::load_orders(&s.dir)
                 .iter()
-                .filter(|o| o.pending())
+                .filter(|o| o.pending() || o.done_at.is_some_and(|d| now - d < SETTLE_SECS))
                 .map(|o| o.verb.clone())
                 .collect(),
         });
