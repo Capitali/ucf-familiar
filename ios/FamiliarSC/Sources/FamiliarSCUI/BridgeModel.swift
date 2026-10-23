@@ -371,6 +371,21 @@ public final class BridgeModel {
     }
 
     @MainActor
+    public func closeOps() async -> CloseOpsState? {
+        guard let world else { return nil }
+        return try? await acts.closeOps(world: world)
+    }
+
+    @MainActor
+    public func setCloseOps(_ on: Bool) async -> (CloseOpsState?, ActOutcome) {
+        guard let world else { return (nil, ActOutcome(ok: false, text: "no ship open")) }
+        do {
+            let st = try await acts.setCloseOps(world: world, on: on)
+            return (st, ActOutcome(ok: true, text: on ? "Close fleet operations on: the captain goes to whichever ship is worn." : "Close fleet operations off."))
+        } catch { return (nil, ActOutcome(ok: false, text: "\(error)")) }
+    }
+
+    @MainActor
     public func setCaptain(_ captain: String) async -> ActOutcome {
         guard let world else { return ActOutcome(ok: false, text: "no ship open") }
         do { let n = try await acts.setCaptain(world: world, captain: captain); await refreshShips(); persona = try await feed.persona(world: world)

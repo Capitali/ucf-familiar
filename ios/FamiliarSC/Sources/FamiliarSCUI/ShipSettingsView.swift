@@ -17,6 +17,7 @@ public struct ShipSettingsView: View {
     @State private var busy = false
     @State private var outcome: BridgeModel.ActOutcome?
     @State private var confirmUnpair = false
+    @State private var closeOps: CloseOpsState?
 
     public init(model: BridgeModel) { self.model = model }
 
@@ -59,6 +60,18 @@ public struct ShipSettingsView: View {
                         Button("Move ship to this captain") { act { await model.setCaptain(captain.trimmingCharacters(in: .whitespaces)) } }
                             .disabled(busy || captain.trimmingCharacters(in: .whitespaces).isEmpty || captain == s.captain)
                     }
+                    if let c = closeOps {
+                        Section("Close fleet operations") {
+                            Toggle(isOn: Binding(get: { c.on }, set: { on in
+                                busy = true; outcome = nil
+                                Task { let (st, o) = await model.setCloseOps(on); if let st { closeOps = st }; outcome = o; busy = false }
+                            })) { VStack(alignment: .leading) { Text("Keep every drive repaired"); Text("a worn ship meets the captain's ship at one berth; the captain boards it, it repairs, the rotation goes on").font(.caption).foregroundStyle(.secondary) } }
+                            .disabled(busy)
+                            if let t = c.targetName, let st = c.station {
+                                Text("Now: bringing the captain to \(t) at \(st).").font(.caption).foregroundStyle(SC.ice)
+                            }
+                        }
+                    }
                     Section {
                         LabeledContent("World", value: s.world).font(.caption.monospaced())
                         LabeledContent("Exchange", value: s.server).font(.caption)
@@ -77,6 +90,7 @@ public struct ShipSettingsView: View {
             .navigationTitle(summary.map { $0.hull.isEmpty ? $0.label : $0.hull } ?? "Ship")
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .onAppear(perform: seed)
+            .task { closeOps = await model.closeOps() }
             .onChange(of: model.ships) { _, _ in seed() }
         }
     }

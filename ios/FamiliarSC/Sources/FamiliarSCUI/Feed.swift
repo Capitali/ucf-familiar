@@ -249,9 +249,32 @@ public protocol CaptainActs: Sendable {
     /// File a standing order the captain gave: on this hull, or on every hull the
     /// captain flies. Returns what the host said. The pilots fly it ahead of their doctrine.
     func order(_ order: OrderRequest, world: String) async throws -> String
+    /// Close fleet operations: the captain walked hull to hull so every drive gets repaired
+    /// (the host's `captains/{id}/close-ops`). Nil where no host keeps it.
+    func closeOps(world: String) async throws -> CloseOpsState?
+    func setCloseOps(world: String, on: Bool) async throws -> CloseOpsState?
+}
+
+/// The captain's close-operations option and the meeting under way, as the host says it.
+public struct CloseOpsState: Equatable, Sendable {
+    public var on: Bool
+    /// The worn hull the captain is being brought to, and where they meet.
+    public var targetName: String?
+    public var station: String?
+    public init(on: Bool, targetName: String? = nil, station: String? = nil) {
+        self.on = on; self.targetName = targetName; self.station = station
+    }
+    public init?(json v: JSONValue) {
+        guard let on = v["on"]?.bool else { return nil }
+        self.init(on: on, targetName: v["target_name"]?.string, station: v["station"]?.string)
+    }
 }
 
 public extension CaptainActs {
+    func closeOps(world: String) async throws -> CloseOpsState? { nil }
+    func setCloseOps(world: String, on: Bool) async throws -> CloseOpsState? {
+        throw FeedError.needsHost("close fleet operations runs on a fleet host; add a host connection")
+    }
     func order(_ order: OrderRequest, world: String) async throws -> String {
         throw FeedError.needsHost("orders go to the pilots through a fleet host; add a host connection")
     }

@@ -264,6 +264,28 @@ public struct WireFeed: ShipsFeed, CaptainActs {
         }
     }
 
+    public func closeOps(world: String) async throws -> CloseOpsState? {
+        guard let path = try await closeOpsPath(world: world) else { return nil }
+        let d = try await call(path)
+        return (try? JSONDecoder().decode(JSONValue.self, from: d)).flatMap(CloseOpsState.init(json:))
+    }
+
+    public func setCloseOps(world: String, on: Bool) async throws -> CloseOpsState? {
+        guard let path = try await closeOpsPath(world: world) else {
+            throw FeedError.unavailable("this host does not say which captain flies this hull")
+        }
+        let d = try await call(path, method: "PUT", body: try JSONEncoder().encode(["on": on]))
+        return (try? JSONDecoder().decode(JSONValue.self, from: d)).flatMap(CloseOpsState.init(json:))
+    }
+
+    /// `captains/<id>/close-ops`, beside the brief's route.
+    private func closeOpsPath(world: String) async throws -> String? {
+        let row = (try? await envelope("ships"))?.ships?.first { $0["world"]?.string == world }
+        guard let brief = WireFeed.captainBriefPath(row: row, captainName: row?["captain"]?.string),
+              brief.hasPrefix("captains/"), brief.hasSuffix("/brief") else { return nil }
+        return String(brief.dropLast("brief".count)) + "close-ops"
+    }
+
     /// `captains/<id>/brief` → `captains/<id>/orders`; nil for a path that is not a brief's.
     static func captainOrdersPath(briefPath: String) -> String? {
         guard briefPath.hasPrefix("captains/"), briefPath.hasSuffix("/brief") else { return nil }
