@@ -2430,6 +2430,46 @@ fn main() -> ExitCode {
                             .any(|t| t.verb == "travel" && t.pending() && t.station == o.station)
                 })
                 .map(|o| (o.id.clone(), o.station.clone().unwrap_or_default()));
+            // A course the tank cannot fly is accepted and then dropped at the fold,
+            // so the hold re-filed it every two ticks for a week: KBC-03 sat at
+            // foxys-diner on 6 fuel from 2026-10-27 to 2026-11-02. Short of the leg,
+            // fill the tank here first; at a berth with no pump, leave the fold to the
+            // doctrine, whose fuel rules divert to one.
+            let hold_elsewhere = hold_elsewhere.filter(|(oid, st)| {
+                let here = ship.docked.clone().unwrap_or_default();
+                let Some(need) = wire.fuel_between(&here, st).map(|c| {
+                    doctrine::fuel_at_drive(c + doctrine::onward_to_pump(st, &pumps, &wire), ship.accel_milli_g)
+                }) else {
+                    return true;
+                };
+                if ship.fuel >= need {
+                    return true;
+                }
+                let key = format!("{oid}|short");
+                if pumps.contains(&here) && !ship.denied.iter().any(|v| v == "refuel") {
+                    seq += 1;
+                    let id = format!("whisker-{}-{}", now_secs(), seq);
+                    let r = wire.act(json!({"type": "refuel"}), &id);
+                    if let Ok(ack) = &r {
+                        pending_until =
+                            ack.get("resolvesAtTick").and_then(Value::as_i64).unwrap_or(tick) + 1;
+                    }
+                    journal(
+                        &ship_dir,
+                        json!({"at": now, "tick": tick, "event": "order-underway", "order": oid,
+                               "verb": "refuel", "why": format!("the tank holds {} of the {need} the course to {st} needs: refuel first", ship.fuel),
+                               "ok": r.is_ok(), "refused": r.err()}),
+                    );
+                } else if key != last_hold_travel_refusal {
+                    journal(
+                        &ship_dir,
+                        json!({"at": now, "tick": tick, "event": "order-waits", "order": oid,
+                               "verb": "travel", "why": format!("the tank holds {} of the {need} the course to {st} needs, and this berth sells none", ship.fuel)}),
+                    );
+                    last_hold_travel_refusal = key;
+                }
+                false
+            });
             if let Some((oid, st)) = hold_elsewhere {
                 if ship.denied.iter().any(|v| v == "travel") {
                     let key = format!("{oid}|denied");
