@@ -279,7 +279,7 @@
 				CODE_SIGN_ENTITLEMENTS = UCFFamiliar/Support/UCFFamiliar.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 12;
+				CURRENT_PROJECT_VERSION = 15;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
 					"\"FamiliarCore\"",
@@ -466,7 +466,7 @@
 				CODE_SIGN_ENTITLEMENTS = UCFFamiliar/Support/UCFFamiliar.entitlements;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 12;
+				CURRENT_PROJECT_VERSION = 15;
 				FRAMEWORK_SEARCH_PATHS = (
 					"$(inherited)",
 					"\"FamiliarCore\"",
